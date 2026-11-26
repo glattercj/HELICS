@@ -708,3 +708,67 @@ TEST_F(dynFed, reentrant_fed_input_single_core)
 
     vFed2Redo.disconnect();
 }
+
+/** the subscription to pub2 is marked reconnectable only in the interface configuration, so it
+must still get data from a publisher that leaves and rejoins*/
+static void reentrantConfigReconnectable(FederateTestFixture& fixture, const std::string& config)
+{
+    fixture.extraBrokerArgs = "--dynamic";
+    fixture.extraFederateArgs = " --reentrant";
+    fixture.SetupTest<helics::ValueFederate>("test_2", 2, 1.0);
+    auto vFed1 = fixture.GetFederateAs<helics::ValueFederate>(0);
+    auto vFed2 = fixture.GetFederateAs<helics::ValueFederate>(1);
+
+    vFed1->registerInterfaces(config);
+    auto& in2 = vFed1->getInputByTarget("pub2");
+    ASSERT_TRUE(in2.isValid());
+
+    auto& pub2 = vFed2->registerGlobalPublication<double>("pub2");
+
+    vFed1->enterExecutingModeAsync();
+    vFed2->enterExecutingMode();
+    vFed1->enterExecutingModeComplete();
+
+    pub2.publish(-12.0);
+    vFed1->requestTimeAsync(helics::timeZero);
+    vFed2->requestNextStep();
+    auto tres = vFed1->requestTimeComplete();
+    EXPECT_EQ(tres, 1.0);
+    EXPECT_DOUBLE_EQ(in2.getDouble(), -12.0);
+
+    auto vFed2Name = vFed2->getName();
+    vFed2->disconnect();
+    tres = vFed1->requestTime(helics::timeZero);
+    EXPECT_EQ(tres, 2.0);
+
+    helics::FederateInfo fedInfo(helics::CoreType::TEST);
+    fedInfo.loadInfoFromArgs(std::string("--reentrant --force_new_core --dynamic --broker=") +
+                             fixture.brokers[0]->getIdentifier() + " --period=1.0s");
+
+    helics::ValueFederate vFed2Redo(vFed2Name, fedInfo);
+    auto& pub2redo = vFed2Redo.registerGlobalPublication<double>("pub2");
+    vFed2Redo.enterExecutingMode();
+
+    pub2redo.publish(-19.45);
+    vFed2Redo.requestTimeAsync(5.0);
+    tres = vFed1->requestTime(3.0);
+    EXPECT_EQ(tres, 3.0);
+    EXPECT_DOUBLE_EQ(in2.getDouble(), -19.45);
+    vFed1->disconnect();
+
+    vFed2Redo.requestTimeComplete();
+    vFed2Redo.disconnect();
+}
+
+TEST_F(dynFed, reentrant_fed_json_reconnectable_subscription)
+{
+    reentrantConfigReconnectable(
+        *this, R"({"subscriptions":[{"key":"pub2","type":"double","reconnectable":true}]})");
+}
+
+TEST_F(dynFed, reentrant_fed_toml_reconnectable_subscription)
+{
+    reentrantConfigReconnectable(*this,
+                                 "[[subscriptions]]\nkey=\"pub2\"\ntype=\"double\"\n"
+                                 "reconnectable=true\n");
+}
