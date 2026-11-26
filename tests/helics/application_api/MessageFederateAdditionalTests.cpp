@@ -1234,3 +1234,50 @@ TEST_F(mfed_tests, reentrant_fed_endpoint)
     }
     mFed2Redo.disconnect();
 }
+
+TEST_F(mfed_tests, reentrant_fed_endpoint_subbroker_source_gone)
+{
+    extraBrokerArgs = "--dynamic";
+    extraFederateArgs = " --reentrant";
+    auto broker = AddBroker("test", 1);
+    AddFederates<helics::MessageFederate>("test_3", 1, broker, 1.0);
+    auto mFed1 = GetFederateAs<helics::MessageFederate>(0);
+    ASSERT_EQ(brokers.size(), 2U);
+    mFed1->registerGlobalTargetedEndpoint("ept1");
+    mFed1->enterExecutingMode();
+
+    helics::FederateInfo fedInfo(helics::CoreType::TEST);
+    fedInfo.loadInfoFromArgs(
+        std::string("--reentrant --force_new_core --dynamic --period=1.0s --broker=") +
+        brokers[1]->getIdentifier());
+    auto mFed2 = std::make_unique<helics::MessageFederate>("target_fed", fedInfo);
+    mFed2->registerGlobalTargetedEndpoint("ept2");
+    mFed2->enterExecutingMode();
+    mFed2->query("root", "global_flush");
+
+    // a federate under the same subbroker links to the endpoint there, then leaves
+    auto mFed3 = std::make_unique<helics::MessageFederate>("source_fed", fedInfo);
+    auto& ept3 = mFed3->registerGlobalTargetedEndpoint("ept3");
+    ept3.setOption(HELICS_HANDLE_OPTION_RECONNECTABLE);
+    ept3.addDestinationEndpoint("ept2");
+    mFed3->enterExecutingMode();
+    mFed3->query("root", "global_flush");
+    mFed3->disconnect();
+    mFed3.reset();
+
+    // the target comes back after the source is gone
+    mFed2->disconnect();
+    mFed2.reset();
+    helics::MessageFederate mFed2Redo("target_fed", fedInfo);
+    mFed2Redo.registerGlobalTargetedEndpoint("ept2");
+    EXPECT_NO_THROW(mFed2Redo.enterExecutingMode());
+    mFed2Redo.query("root", "global_flush");
+    // the subbroker made it through the reconnection lookup
+    EXPECT_TRUE(brokers[1]->isConnected());
+
+    mFed1->requestTimeAsync(1.0);
+    EXPECT_EQ(mFed2Redo.requestTime(1.0), 1.0);
+    EXPECT_EQ(mFed1->requestTimeComplete(), 1.0);
+    mFed1->disconnect();
+    mFed2Redo.disconnect();
+}

@@ -580,6 +580,67 @@ TEST_F(dynFed, reentrant_fed_publication_subbroker)
     vFed3->disconnect();
 }
 
+TEST_F(dynFed, reentrant_fed_publication_same_subbroker)
+{
+    extraBrokerArgs = "--dynamic";
+    extraFederateArgs = " --reentrant";
+    auto broker = AddBroker("test", 1);
+    AddFederates<helics::ValueFederate>("test_3", 1, broker, 1.0);
+    auto vFed1 = GetFederateAs<helics::ValueFederate>(0);
+    ASSERT_EQ(brokers.size(), 2U);
+
+    auto& pub1 = vFed1->registerGlobalPublication<double>("pub1");
+    vFed1->enterExecutingMode();
+    EXPECT_EQ(vFed1->requestTime(1.0), 1.0);
+
+    // a federate under the same subbroker subscribes after the publication is known there
+    helics::FederateInfo fedInfo(helics::CoreType::TEST);
+    fedInfo.loadInfoFromArgs(std::string("--force_new_core --dynamic --period=1.0s --broker=") +
+                             brokers[1]->getIdentifier());
+    helics::ValueFederate vFed2("same_sub_fed", fedInfo);
+    vFed2.setFlagOption(HELICS_HANDLE_OPTION_RECONNECTABLE);
+    auto& in1 = vFed2.registerSubscription("pub1");
+    vFed1->requestTimeAsync(2.0);
+    vFed2.enterExecutingMode();
+    EXPECT_LE(vFed2.getCurrentTime(), 1.0);
+    // make sure the new links have reached both cores
+    vFed2.query("root", "global_flush");
+    EXPECT_EQ(vFed2.requestTime(2.0), 2.0);
+    EXPECT_EQ(vFed1->requestTimeComplete(), 2.0);
+
+    pub1.publish(12.0);
+    vFed1->requestTimeAsync(3.0);
+    EXPECT_EQ(vFed2.requestTime(3.0), 3.0);
+    EXPECT_DOUBLE_EQ(in1.getDouble(), 12.0);
+    EXPECT_EQ(vFed1->requestTimeComplete(), 3.0);
+
+    auto vFed1Name = vFed1->getName();
+    vFed1->disconnect();
+    EXPECT_EQ(vFed2.requestTime(4.0), 4.0);
+
+    // rejoin through the same subbroker
+    helics::FederateInfo fedInfo2(helics::CoreType::TEST);
+    fedInfo2.loadInfoFromArgs(std::string("--reentrant --force_new_core --dynamic --broker=") +
+                              brokers[1]->getIdentifier() + " --period=1.0s");
+    helics::ValueFederate vFed1Redo(vFed1Name, fedInfo2);
+    auto& pub1redo = vFed1Redo.registerGlobalPublication<double>("pub1");
+    vFed1Redo.enterExecutingMode();
+    EXPECT_LE(vFed1Redo.getCurrentTime(), 4.0);
+    vFed1Redo.query("root", "global_flush");
+    vFed1Redo.requestTimeAsync(5.0);
+    EXPECT_EQ(vFed2.requestTime(5.0), 5.0);
+    EXPECT_EQ(vFed1Redo.requestTimeComplete(), 5.0);
+
+    pub1redo.publish(19.45);
+    vFed1Redo.requestTimeAsync(6.0);
+    EXPECT_EQ(vFed2.requestTime(6.0), 6.0);
+    EXPECT_DOUBLE_EQ(in1.getDouble(), 19.45);
+
+    vFed2.disconnect();
+    vFed1Redo.requestTimeComplete();
+    vFed1Redo.disconnect();
+}
+
 TEST_F(dynFed, reentrant_fed_input_single_core)
 {
     extraBrokerArgs = "--dynamic";
