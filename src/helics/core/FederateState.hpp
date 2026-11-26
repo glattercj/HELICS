@@ -107,7 +107,7 @@ class FederateState {
     int errorCode{0};  //!< storage for an error code
     CommonCore* mParent{nullptr};  //!< pointer to the higher level;
     std::string errorString;  //!< storage for an error string populated on an error
-    /** time the initialization mode started for real time capture */
+    /** wall clock time that matches time 0 for real time pacing */
     decltype(std::chrono::steady_clock::now()) start_clock_time;
     Time rt_lag{timeZero};  //!< max lag for the rt control
     Time rt_lead{timeZero};  //!< min lag for the realtime control

@@ -185,3 +185,52 @@ TEST_F(federate_realtime_tests, federate_trigger_tests_ci_skip)
     fed->finalize();
     broker->disconnect();
 }
+
+/** a realtime federate that joins a dynamic federation late should be paced from the time it
+ * entered executing mode, not from time 0*/
+TEST_F(federate_realtime_tests, dynamic_late_join_ci_skip)
+{
+    extraBrokerArgs = "--dynamic";
+    auto broker = AddBroker("test", 1);
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.coreName = "clate1";
+    fedInfo.coreInitString = std::string("-f 1 --broker=") + broker->getIdentifier();
+    fedInfo.setProperty(helics::defs::Properties::PERIOD, 1.0);
+    auto fed1 = std::make_shared<helics::ValueFederate>("fed1", fedInfo);
+    fed1->registerGlobalPublication<double>("pub1");
+    fed1->enterExecutingMode();
+    auto gtime = fed1->requestTime(10.0);
+    EXPECT_EQ(gtime, 10.0);
+
+    helics::FederateInfo lateInfo(CORE_TYPE_TO_TEST);
+    lateInfo.coreName = "clate2";
+    lateInfo.coreInitString = std::string("-f 1 --dynamic --broker=") + broker->getIdentifier();
+    lateInfo.setFlagOption(helics::defs::Flags::REALTIME);
+    lateInfo.setProperty(helics::defs::Properties::PERIOD, 0.5);
+    auto late = std::make_shared<helics::ValueFederate>("late", lateInfo);
+    late->registerSubscription("pub1");
+    late->enterExecutingMode();
+    auto entryTime = late->getCurrentTime();
+    EXPECT_GT(entryTime, 5.0);
+    // let the existing federate run ahead so only the realtime pacing holds the late one back
+    fed1->requestTimeAsync(20.0);
+
+    auto start = std::chrono::steady_clock::now();
+    gtime = late->requestTime(entryTime + 0.5);
+    EXPECT_EQ(gtime, entryTime + 0.5);
+    auto elapsed = helics::Time(std::chrono::steady_clock::now() - start);
+    // paced from time 0 the first grant would wait for the full entry time
+    EXPECT_LT(elapsed, 2.0);
+
+    gtime = late->requestTime(entryTime + 2.0);
+    EXPECT_EQ(gtime, entryTime + 2.0);
+    elapsed = helics::Time(std::chrono::steady_clock::now() - start);
+    // still paced in real time after entry
+    EXPECT_GT(elapsed, 1.8);
+    EXPECT_LT(elapsed, 3.5);
+
+    late->finalize();
+    fed1->requestTimeComplete();
+    fed1->finalize();
+    broker->disconnect();
+}

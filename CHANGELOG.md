@@ -11,6 +11,10 @@ Everything within a major version number should be code compatible (with the exc
 
 ## Unreleased
 
+### Fixed
+
+- Fixed realtime pacing for a federate that joins a dynamic federation late, including a reentrant federate that rejoins. The wall clock was anchored to time 0, so the first grant after entering executing mode at time T waited about T seconds and the federate then ran T seconds behind the rest of the federation. The clock is now anchored to the time granted on entering executing mode. A federate entering at time 0 is unaffected. Setting `rt_lead` to the entry time is no longer needed as a workaround.
+
 ## [3.7.1][] - 2026-11-22
 
 This patch adds backpressure for queued value updates, fixes broker initialization and timeout handling, and updates release builds.
