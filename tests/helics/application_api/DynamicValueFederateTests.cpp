@@ -454,6 +454,50 @@ TEST_F(dynFed, reentrant_fed_publication)
     vFed2Redo.disconnect();
 }
 
+TEST_F(dynFed, dynamic_fed_new_subbroker)
+{
+    extraBrokerArgs = "--dynamic";
+    SetupTest<helics::ValueFederate>("test_2", 1, 1.0);
+    auto vFed1 = GetFederateAs<helics::ValueFederate>(0);
+
+    auto& pub1 = vFed1->registerGlobalPublication<double>("pub1");
+    vFed1->enterExecutingMode();
+    EXPECT_EQ(vFed1->requestTime(1.0), 1.0);
+
+    // a new subbroker joins the running federation, then a new federate through it
+    auto sub = AddBroker("test", "--broker=" + brokers[0]->getIdentifier());
+    ASSERT_TRUE(sub->isConnected());
+
+    helics::FederateInfo fedInfo(helics::CoreType::TEST);
+    fedInfo.loadInfoFromArgs(std::string("--force_new_core --dynamic --period=1.0s --broker=") +
+                             sub->getIdentifier());
+    helics::ValueFederate vFed2("late_fed", fedInfo);
+    auto& in1 = vFed2.registerSubscription("pub1");
+
+    vFed1->requestTimeAsync(2.0);
+    vFed2.enterExecutingMode();
+    EXPECT_LE(vFed2.getCurrentTime(), 1.0);
+    // make sure the new links have reached both cores
+    vFed2.query("root", "global_flush");
+    vFed2.requestTimeAsync(2.0);
+    EXPECT_EQ(vFed1->requestTimeComplete(), 2.0);
+    EXPECT_EQ(vFed2.requestTimeComplete(), 2.0);
+    // vFed1 may have been granted time 2 before the new subscriber reached it; it takes the
+    // subscriber in during its next time request
+    vFed1->requestTimeAsync(3.0);
+    EXPECT_EQ(vFed2.requestTime(3.0), 3.0);
+    EXPECT_EQ(vFed1->requestTimeComplete(), 3.0);
+
+    pub1.publish(15.0);
+    vFed1->requestTimeAsync(4.0);
+    EXPECT_EQ(vFed2.requestTime(4.0), 4.0);
+    EXPECT_DOUBLE_EQ(in1.getDouble(), 15.0);
+    EXPECT_EQ(vFed1->requestTimeComplete(), 4.0);
+
+    vFed1->disconnect();
+    vFed2.disconnect();
+}
+
 TEST_F(dynFed, reentrant_fed_publication_subbroker)
 {
     extraBrokerArgs = "--dynamic";
