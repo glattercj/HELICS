@@ -275,8 +275,10 @@ std::tuple<FederateStates, MessageProcessingResult, bool>
         case CMD_ERROR:
         case CMD_LOCAL_ERROR:
         case CMD_GLOBAL_ERROR:
+            // an error from a broker is about this federate; one found in a subbroker comes
+            // with the subbroker's id
             if (cmd.action() == CMD_GLOBAL_ERROR || cmd.source_id == localID ||
-                cmd.source_id == parent_broker_id || cmd.source_id == gRootBrokerID ||
+                cmd.source_id == parent_broker_id || cmd.source_id.isBroker() ||
                 cmd.dest_id != localID) {
                 if ((state != FederateStates::FINISHED) && (state != FederateStates::TERMINATING)) {
                     if (cmd.action() != CMD_GLOBAL_ERROR) {

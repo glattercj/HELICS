@@ -246,6 +246,36 @@ TEST_F(error_tests, duplicate_publication_names_subbroker)
     broker->disconnect();
 }
 
+TEST_F(error_tests, duplicate_publication_names_same_subbroker)
+{
+    auto broker = AddBroker("test", 3);
+    AddFederates<helics::ValueFederate>("test", 1, broker, 1.0, "fed");
+    AddFederates<helics::ValueFederate>("test_3", 2, broker, 1.0, "subfed");
+
+    auto fed1 = GetFederateAs<helics::ValueFederate>(0);
+    auto fed2 = GetFederateAs<helics::ValueFederate>(1);
+    auto fed3 = GetFederateAs<helics::ValueFederate>(2);
+
+    fed2->registerGlobalPublication("testkey", "");
+    // make sure the subbroker has the first publication
+    fed2->query("root", "global_flush");
+    fed1->enterInitializingModeAsync();
+    fed2->enterInitializingModeAsync();
+
+    // the duplicate is detected in the subbroker
+    fed3->registerGlobalPublication("testkey", "");
+    EXPECT_THROW(fed3->enterInitializingMode(), helics::RegistrationFailure);
+    EXPECT_EQ(fed3->getCurrentMode(), helics::Federate::Modes::ERROR_STATE);
+    fed3->finalize();
+
+    EXPECT_NO_THROW(fed1->enterInitializingModeComplete());
+    EXPECT_NO_THROW(fed2->enterInitializingModeComplete());
+    EXPECT_EQ(fed2->getCurrentMode(), helics::Federate::Modes::INITIALIZING);
+    fed1->finalize();
+    fed2->finalize();
+    broker->disconnect();
+}
+
 TEST_F(error_tests, duplicate_publication_names2_init_iteration)
 {
     auto broker = AddBroker("test", 2);
