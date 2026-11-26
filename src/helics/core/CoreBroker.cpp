@@ -1887,11 +1887,29 @@ void CoreBroker::processBrokerConfigureCommands(ActionMessage& cmd)
     }
 }
 
+// the type of interface a CMD_ADD_NAMED_* command looks for
+static InterfaceType namedTargetType(action_message_def::action_t action)
+{
+    switch (action) {
+        case CMD_ADD_NAMED_PUBLICATION:
+            return InterfaceType::PUBLICATION;
+        case CMD_ADD_NAMED_INPUT:
+            return InterfaceType::INPUT;
+        case CMD_ADD_NAMED_FILTER:
+            return InterfaceType::FILTER;
+        default:
+            return InterfaceType::ENDPOINT;
+    }
+}
+
 void CoreBroker::checkForNamedInterface(ActionMessage& command)
 {
     bool foundInterface = false;
     if (checkActionFlag(command, reconnectable_flag)) {
-        if (isRootc) {
+        // a link made below the root never reaches it, so the broker that makes it keeps it
+        if (isRootc ||
+            handles.getInterfaceHandle(command.name(), namedTargetType(command.action())) !=
+                nullptr) {
             switch (command.action()) {
                 case CMD_ADD_NAMED_PUBLICATION:
                     unknownHandles.addReconnectablePublication(command.name(),
@@ -2273,9 +2291,9 @@ void CoreBroker::addPublication(ActionMessage& message)
     addLocalInfo(pub, message);
     if (!isRootc) {
         transmit(parent_route_id, message);
-    } else {
-        findAndNotifyPublicationTargets(pub, pub.key);
     }
+    // below the root this only rebuilds the reconnectable links this broker made
+    findAndNotifyPublicationTargets(pub, pub.key);
 }
 void CoreBroker::addInput(ActionMessage& message)
 {
@@ -2292,9 +2310,9 @@ void CoreBroker::addInput(ActionMessage& message)
     addLocalInfo(inp, message);
     if (!isRootc) {
         transmit(parent_route_id, message);
-    } else {
-        findAndNotifyInputTargets(inp, inp.key);
     }
+    // below the root this only rebuilds the reconnectable links this broker made
+    findAndNotifyInputTargets(inp, inp.key);
 }
 
 void CoreBroker::addEndpoint(ActionMessage& message)
@@ -2326,9 +2344,9 @@ void CoreBroker::addEndpoint(ActionMessage& message)
                 timeCoord->setAsParent(higher_broker_id);
             }
         }
-    } else {
-        findAndNotifyEndpointTargets(ept, ept.key);
     }
+    // below the root this only rebuilds the reconnectable links this broker made
+    findAndNotifyEndpointTargets(ept, ept.key);
 }
 void CoreBroker::addFilter(ActionMessage& message)
 {
@@ -3321,6 +3339,10 @@ void CoreBroker::findAndNotifyEndpointTargets(BasicHandleInfo& handleInfo, const
         uHandles = unknownHandles.checkForReconnectionEndpoints(key);
         for (const auto& target : uHandles) {
             const auto* iface = handles.findHandle(target.first);
+            if (iface == nullptr) {
+                // the source has left since the link was made, it links again if it comes back
+                continue;
+            }
             auto destFlags = target.second;
             if (iface->handleType != InterfaceType::FILTER) {
                 destFlags = toggle_flag(destFlags, destination_target);
