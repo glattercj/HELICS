@@ -527,6 +527,64 @@ TEST(broker_timeout, core_fail_error)
     Fed1->finalize();
 }
 
+// losing a core whose federates are all reentrant is treated as a disconnect so they can rejoin
+TEST(broker_timeout, reentrant_core_fail_rejoin)
+{
+    auto brk =
+        helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--dynamic --timeout=1s --tick=500ms");
+    brk->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.setProperty(HELICS_PROPERTY_TIME_PERIOD, 1.0);
+    fedInfo.coreName = "crent1";
+    auto Fed1 = std::make_shared<helics::ValueFederate>("test1", fedInfo);
+
+    fedInfo.coreName = "crent2";
+    fedInfo.setFlagOption(HELICS_FLAG_REENTRANT);
+    auto Fed2 = std::make_shared<helics::ValueFederate>("test2", fedInfo);
+
+    Fed1->setFlagOption(HELICS_HANDLE_OPTION_RECONNECTABLE);
+    auto& in1 = Fed1->registerSubscription("pub2");
+    Fed2->registerGlobalPublication<double>("pub2");
+
+    Fed1->enterExecutingModeAsync();
+    Fed2->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+
+    auto core = Fed2->getCorePointer();
+    auto tcr = std::dynamic_pointer_cast<helics::testcore::TestCore>(core);
+    EXPECT_TRUE(tcr);
+
+    auto cms = tcr->getCommsObjectPointer();
+    cms->haltComms();  // this will terminate communications abruptly
+    tcr.reset();
+
+    // give the broker time to detect the lost core
+    std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+    EXPECT_TRUE(brk->isConnected());
+    EXPECT_NE(Fed1->getCurrentMode(), helics::Federate::Modes::ERROR_STATE);
+
+    fedInfo.coreName = "crent3";
+    fedInfo.coreInitString = "--dynamic --broker=" + brk->getIdentifier();
+    std::unique_ptr<helics::ValueFederate> Fed2Redo;
+    EXPECT_NO_THROW(Fed2Redo = std::make_unique<helics::ValueFederate>("test2", fedInfo));
+    if (Fed2Redo && brk->isConnected()) {
+        auto& pub2redo = Fed2Redo->registerGlobalPublication<double>("pub2");
+        Fed2Redo->enterExecutingMode();
+        pub2redo.publish(-19.45);
+        Fed2Redo->requestTimeAsync(5.0);
+        helics::Time granted{helics::timeZero};
+        EXPECT_NO_THROW(granted = Fed1->requestTime(5.0));
+        EXPECT_GT(granted, helics::timeZero);
+        EXPECT_DOUBLE_EQ(in1.getDouble(), -19.45);
+        Fed2Redo->requestTimeComplete();
+        Fed2Redo->finalize();
+    }
+    Fed1->finalize();
+    core->disconnect();
+    brk->disconnect();
+}
+
 #ifdef HELICS_ENABLE_ZMQ_CORE
 TEST(broker_timeout, maintain_connection_ci_skip)
 {
