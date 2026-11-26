@@ -15,6 +15,8 @@ SPDX-License-Identifier: BSD-3-Clause
 /** these test cases test out the value converters
  */
 #include "helics/application_api.hpp"
+#include "helics/core/ActionMessage.hpp"
+#include "helics/core/CoreBroker.hpp"
 #include "helics/network/test/TestComms.h"
 #include "helics/network/test/TestCore.h"
 
@@ -890,6 +892,174 @@ TEST(broker_timeout, reentrant_fed_lost_under_subbroker_rejoins_at_root)
     Fed3->finalize();
     sub->waitForDisconnect(std::chrono::milliseconds(500));
     brk->waitForDisconnect(std::chrono::milliseconds(500));
+}
+
+// the id a broker reports for a federate
+static int federateId(helics::Broker& broker, std::string_view name)
+{
+    auto state =
+        helics::fileops::loadJsonStr(broker.query(broker.getIdentifier(), "current_state"));
+    for (const auto& fed : state["federates"]) {
+        if (fed["attributes"]["name"].get<std::string>() == name) {
+            return fed["attributes"]["id"].get<int>();
+        }
+    }
+    return -1;
+}
+
+// a disconnect sent up for the old registration of a reentrant federate under a subbroker
+// reaches the root only after the federate has registered again
+TEST(broker_timeout, reentrant_fed_late_disconnect_under_subbroker)
+{
+    auto brk = helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--dynamic -f 3");
+    brk->connect();
+    auto sub = helics::BrokerFactory::create(CORE_TYPE_TO_TEST,
+                                             "--dynamic --broker=" + brk->getIdentifier());
+    sub->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.setProperty(HELICS_PROPERTY_TIME_PERIOD, 1.0);
+    fedInfo.coreInitString = "--broker=" + brk->getIdentifier();
+    fedInfo.coreName = "late_c1";
+    auto Fed1 = std::make_shared<helics::ValueFederate>("fed1", fedInfo);
+
+    // a federate that keeps the subbroker up
+    fedInfo.coreName = "late_c2";
+    fedInfo.coreInitString = "--broker=" + sub->getIdentifier();
+    auto FedX = std::make_shared<helics::ValueFederate>("fedx", fedInfo);
+
+    fedInfo.coreName = "late_c3";
+    fedInfo.setFlagOption(HELICS_FLAG_REENTRANT);
+    auto Fed2 = std::make_shared<helics::ValueFederate>("fed2", fedInfo);
+
+    auto& pub1 = Fed1->registerGlobalPublication<double>("pub1");
+    Fed1->setFlagOption(HELICS_HANDLE_OPTION_RECONNECTABLE);
+    auto& in2 = Fed1->registerSubscription("pub2");
+    Fed2->registerSubscription("pub1");
+    Fed2->registerGlobalPublication<double>("pub2");
+
+    Fed1->enterExecutingModeAsync();
+    FedX->enterExecutingModeAsync();
+    Fed2->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+    FedX->enterExecutingModeComplete();
+    // the subbroker marks it disconnected and tells the root, numbered with the registration
+    Fed2->finalize();
+    EXPECT_EQ(Fed1->requestTime(1.0), 1.0);
+
+    helics::FederateInfo fedInfo2(CORE_TYPE_TO_TEST);
+    fedInfo2.loadInfoFromArgs("--reentrant --force_new_core --dynamic --period=1.0s --broker=" +
+                              sub->getIdentifier());
+    helics::ValueFederate Fed2Redo("fed2", fedInfo2);
+    auto& in1redo = Fed2Redo.registerSubscription("pub1");
+    auto& pub2redo = Fed2Redo.registerGlobalPublication<double>("pub2");
+    EXPECT_NO_THROW(Fed2Redo.enterExecutingMode());
+    // make sure the new links have reached both cores
+    Fed2Redo.query("root", "global_flush");
+
+    // the root numbered the first registration 1; its disconnect arrives late
+    helics::ActionMessage late(helics::CMD_DISCONNECT_FED);
+    late.source_id = helics::GlobalFederateId(federateId(*brk, "fed2"));
+    late.counter = 1;
+    auto root = std::dynamic_pointer_cast<helics::CoreBroker>(brk);
+    ASSERT_TRUE(root);
+    root->addActionMessage(late);
+
+    pub2redo.publish(-19.45);
+    Fed2Redo.requestTimeAsync(2.0);
+    EXPECT_EQ(Fed1->requestTime(2.0), 2.0);
+    EXPECT_EQ(Fed2Redo.requestTimeComplete(), 2.0);
+    EXPECT_DOUBLE_EQ(in2.getDouble(), -19.45);
+
+    pub1.publish(19.45);
+    Fed2Redo.requestTimeAsync(3.0);
+    EXPECT_EQ(Fed1->requestTime(3.0), 3.0);
+    EXPECT_EQ(Fed2Redo.requestTimeComplete(), 3.0);
+    EXPECT_DOUBLE_EQ(in1redo.getDouble(), 19.45);
+    // the root still sees the federate that came back
+    EXPECT_NE(federateState(*brk, "fed2"), "disconnected");
+
+    FedX->finalize();
+    Fed1->finalize();
+    Fed2Redo.finalize();
+    sub->waitForDisconnect(std::chrono::milliseconds(500));
+    brk->waitForDisconnect(std::chrono::milliseconds(500));
+}
+
+// a reentrant federate under a subbroker is refused on a new core while its old instance still
+// runs, and comes back once the old instance has left
+TEST(broker_timeout, reentrant_fed_old_instance_leaves_under_subbroker)
+{
+    auto brk = helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--dynamic -f 3");
+    brk->connect();
+    auto sub = helics::BrokerFactory::create(CORE_TYPE_TO_TEST,
+                                             "--dynamic --broker=" + brk->getIdentifier());
+    sub->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.setProperty(HELICS_PROPERTY_TIME_PERIOD, 1.0);
+    fedInfo.coreInitString = "--broker=" + brk->getIdentifier();
+    fedInfo.coreName = "old_c1";
+    auto Fed1 = std::make_shared<helics::ValueFederate>("fed1", fedInfo);
+
+    // the old core holds the reentrant federate and one that stays
+    fedInfo.coreName = "old_c2";
+    fedInfo.coreInitString = "-f 2 --broker=" + sub->getIdentifier();
+    auto FedX = std::make_shared<helics::ValueFederate>("fedx", fedInfo);
+    fedInfo.setFlagOption(HELICS_FLAG_REENTRANT);
+    auto Fed2 = std::make_shared<helics::ValueFederate>("fed2", fedInfo);
+
+    auto& pub1 = Fed1->registerGlobalPublication<double>("pub1");
+    Fed1->setFlagOption(HELICS_HANDLE_OPTION_RECONNECTABLE);
+    auto& in2 = Fed1->registerSubscription("pub2");
+    Fed2->registerSubscription("pub1");
+    Fed2->registerGlobalPublication<double>("pub2");
+
+    Fed1->enterExecutingModeAsync();
+    FedX->enterExecutingModeAsync();
+    Fed2->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+    FedX->enterExecutingModeComplete();
+
+    helics::FederateInfo fedInfo2(CORE_TYPE_TO_TEST);
+    fedInfo2.loadInfoFromArgs("--reentrant --force_new_core --dynamic --period=1.0s --broker=" +
+                              sub->getIdentifier());
+    // the old instance is still running
+    fedInfo2.coreName = "old_c3";
+    EXPECT_THROW(helics::ValueFederate("fed2", fedInfo2), helics::RegistrationFailure);
+    auto refusedCore = helics::CoreFactory::findCore("old_c3");
+    if (refusedCore) {
+        refusedCore->disconnect();
+    }
+
+    Fed2->finalize();
+    EXPECT_EQ(Fed1->requestTime(1.0), 1.0);
+    fedInfo2.coreName = "old_c4";
+    helics::ValueFederate Fed2Redo("fed2", fedInfo2);
+    auto& in1redo = Fed2Redo.registerSubscription("pub1");
+    auto& pub2redo = Fed2Redo.registerGlobalPublication<double>("pub2");
+    EXPECT_NO_THROW(Fed2Redo.enterExecutingMode());
+    Fed2Redo.query("root", "global_flush");
+    EXPECT_NE(federateState(*sub, "fed2"), "disconnected");
+    EXPECT_NE(federateState(*brk, "fed2"), "disconnected");
+
+    pub2redo.publish(-19.45);
+    Fed2Redo.requestTimeAsync(2.0);
+    EXPECT_EQ(Fed1->requestTime(2.0), 2.0);
+    EXPECT_EQ(Fed2Redo.requestTimeComplete(), 2.0);
+    EXPECT_DOUBLE_EQ(in2.getDouble(), -19.45);
+
+    pub1.publish(19.45);
+    Fed2Redo.requestTimeAsync(3.0);
+    EXPECT_EQ(Fed1->requestTime(3.0), 3.0);
+    EXPECT_EQ(Fed2Redo.requestTimeComplete(), 3.0);
+    EXPECT_DOUBLE_EQ(in1redo.getDouble(), 19.45);
+
+    FedX->finalize();
+    Fed1->finalize();
+    Fed2Redo.finalize();
+    sub->disconnect();
+    brk->disconnect();
 }
 
 #ifdef HELICS_ENABLE_ZMQ_CORE

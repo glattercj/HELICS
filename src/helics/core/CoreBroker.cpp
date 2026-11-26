@@ -598,6 +598,11 @@ void CoreBroker::fedRegistration(ActionMessage&& command)
                 fedLoc->route = getRoute(command.source_id);
                 fedLoc->parent = command.source_id;
                 fedLoc->state = ConnectionState::CONNECTED;
+                // the root broker numbers it the same way, a broker below takes the number
+                // from the acknowledgement
+                if (++fedLoc->registration == 0) {
+                    fedLoc->registration = 1;
+                }
                 newFed = false;
             } else {
                 sendFedErrorAck(command, duplicate_federate_name_error_code);
@@ -654,9 +659,12 @@ void CoreBroker::fedRegistration(ActionMessage&& command)
             delayTransmitQueue.push(command);
         }
     } else {
-        auto route_id = newFed ? mFederates.back().route : mFederates.find(fedName)->route;
-        auto global_fedid =
-            newFed ? mFederates.back().global_id : mFederates.find(fedName)->global_id;
+        auto& fedInfo = newFed ? mFederates.back() : *mFederates.find(fedName);
+        auto route_id = fedInfo.route;
+        auto global_fedid = fedInfo.global_id;
+        if (fedInfo.registration == 0) {
+            fedInfo.registration = 1;
+        }
         auto res = routing_table.emplace(global_fedid, route_id);
         if (!res.second && !newFed) {
             res.first->second = route_id;
@@ -668,6 +676,7 @@ void CoreBroker::fedRegistration(ActionMessage&& command)
         fedReply.source_id = global_broker_id_local;
         fedReply.dest_id = global_fedid;
         fedReply.name(fedName);
+        fedReply.counter = fedInfo.registration;
         if (resetInit && !dynamicFed) {
             resetChildInitReadiness(GlobalBrokerId{command.source_id});
             setActionFlag(fedReply, reset_init_flag);
@@ -767,6 +776,9 @@ void CoreBroker::processPriorityCommand(ActionMessage&& command)
                     fed->global_id = command.dest_id;
                     mFederates.addSearchTerm(command.dest_id, fed->name);
                 }
+                if (!checkActionFlag(command, error_flag)) {
+                    fed->registration = command.counter;
+                }
                 transmit(route, command);
                 // a reentrant federate may come back on a new route
                 routing_table.insert_or_assign(fed->global_id, route);
@@ -782,6 +794,7 @@ void CoreBroker::processPriorityCommand(ActionMessage&& command)
                 mFederates.insert(command.name(), command.dest_id, command.name());
                 mFederates.back().route = getRoute(command.source_id);
                 mFederates.back().global_id = command.dest_id;
+                mFederates.back().registration = command.counter;
                 routing_table.emplace(mFederates.back().global_id, mFederates.back().route);
                 // it also means we don't forward it
             }
@@ -1372,6 +1385,17 @@ void CoreBroker::processCommand(ActionMessage&& command)
         case CMD_DISCONNECT_FED: {
             auto fed = mFederates.find(command.source_id);
             if (fed != mFederates.end()) {
+                if (command.counter != 0 && fed->registration != 0 &&
+                    command.counter != fed->registration) {
+                    // it is about a registration the federate has replaced since
+                    LOG_CONNECTIONS(
+                        global_broker_id_local,
+                        getIdentifier(),
+                        fmt::format("ignoring a disconnect from an earlier registration "
+                                    "of federate {}",
+                                    fed->name));
+                    break;
+                }
                 fed->state = ConnectionState::DISCONNECTED;
                 if (fed->reentrant) {
                     // for reentrant federates the interface can be recreated later so needs to be
@@ -3574,7 +3598,9 @@ void CoreBroker::processDisconnectCommand(ActionMessage& command)
             if (brk != nullptr) {
                 disconnectBroker(*brk);
                 if (command.dest_id == brk->global_id) {
-                    // a higher broker dropped it; pass that down toward its parent
+                    // a higher broker dropped it; register what was waiting on it and pass it
+                    // down toward its parent
+                    releaseHeldRejoins(*brk);
                     if (brk->_nonLocal) {
                         transmit(brk->route, command);
                     }
@@ -3653,6 +3679,7 @@ void CoreBroker::markAsDisconnected(GlobalBrokerId brkid)
                         ActionMessage dis(CMD_DISCONNECT_FED);
                         dis.source_id = fed.global_id;
                         dis.dest_id = parent_broker_id;
+                        dis.counter = fed.registration;
                         transmit(parent_route_id, dis);
                     }
                 }
@@ -3819,6 +3846,7 @@ void CoreBroker::dropReplacedFederate(BasicFedInfo& fed)
         ActionMessage disFed(CMD_DISCONNECT_FED);
         disFed.source_id = fed.global_id;
         disFed.dest_id = parent_broker_id;
+        disFed.counter = fed.registration;
         transmit(parent_route_id, disFed);
     }
     auto* brk = getBrokerById(fed.parent);

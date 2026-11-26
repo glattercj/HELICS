@@ -61,6 +61,8 @@ struct BasicFedInfo {
     bool observer{false};  //!, indicator that the federate is an observer only
     bool dynamic{false};  //!< indicator that the federate joined dynamically
     bool reentrant{false};  //!< indicator that the federate can be reentrant
+    /// which registration of a reentrant federate this is, set by the root broker, 0 if unknown
+    std::uint16_t registration{0};
     explicit BasicFedInfo(std::string_view fedname): name(fedname) {}
 };
 
