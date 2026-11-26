@@ -1205,9 +1205,11 @@ void CoreBroker::processCommand(ActionMessage&& command)
                 if (ignore) {
                     break;
                 }
-                if (partDisconnected) {  // we are going to assume it disconnected just assume
-                                         // broker even though it may be a core, there
-                    // probably isn't any difference for this purpose
+                // a reentrant federate can rejoin later so losing it is not an error
+                if (partDisconnected ||
+                    hasOnlyReentrantFederates(GlobalBrokerId(command.source_id))) {
+                    // we are going to assume it disconnected just assume broker even though it
+                    // may be a core, there probably isn't any difference for this purpose
                     LOG_CONNECTIONS(global_broker_id_local,
                                     getIdentifier(),
                                     fmt::format("disconnecting {} from communication timeout",
@@ -3592,6 +3594,31 @@ void CoreBroker::markAsDisconnected(GlobalBrokerId brkid)
             }
         }
     }
+}
+
+bool CoreBroker::hasOnlyReentrantFederates(GlobalBrokerId brkid) const
+{
+    // collect the broker and everything below it
+    std::vector<GlobalBrokerId> ids{brkid};
+    for (std::size_t ii = 0; ii < ids.size(); ++ii) {
+        for (const auto& brk : mBrokers) {
+            if (brk.parent == ids[ii] && brk.global_id != ids[ii]) {
+                ids.push_back(brk.global_id);
+            }
+        }
+    }
+    bool found{false};
+    for (const auto& fed : mFederates) {
+        if (fed.state >= ConnectionState::ERROR_STATE ||
+            std::find(ids.begin(), ids.end(), fed.parent) == ids.end()) {
+            continue;
+        }
+        if (!fed.reentrant) {
+            return false;
+        }
+        found = true;
+    }
+    return found;
 }
 
 void CoreBroker::disconnectBroker(BasicBrokerInfo& brk)
