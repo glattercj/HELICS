@@ -3353,6 +3353,10 @@ void CommonCore::processPriorityCommand(ActionMessage&& command)
                     }
                     fed->global_id = command.dest_id;
                     loopFederates.addSearchTerm(command.dest_id, command.name());
+                    auto fedInfo = loopFederates.find(command.name());
+                    if (fedInfo != loopFederates.end()) {
+                        fedInfo->registration = command.counter;
+                    }
                     if (!keyFed.isValid()) {
                         keyFed = fed->global_id;
                     }
@@ -4929,6 +4933,8 @@ void CommonCore::processDisconnectCommand(ActionMessage& cmd)
                     const bool alreadyTerminating = (cstate == BrokerState::TERMINATING);
                     if ((!checkAndProcessDisconnect()) || preOperating || alreadyTerminating) {
                         cmd.setAction(CMD_DISCONNECT_FED);
+                        // lets the brokers tell it from a later registration of the federate
+                        cmd.counter = fed->registration;
                         transmit(parent_route_id, cmd);
                         if ((preOperating || alreadyTerminating ||
                              minFederateState() != OperatingState::DISCONNECTED ||

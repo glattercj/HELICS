@@ -59,6 +59,8 @@ class FedInfo {
   public:
     FederateState* fed = nullptr;
     OperatingState state{OperatingState::OPERATING};
+    /// the registration number from the broker acknowledgement
+    std::uint16_t registration{0};
 
     constexpr FedInfo() = default;
     constexpr explicit FedInfo(FederateState* newfed) noexcept: fed(newfed) {}
