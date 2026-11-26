@@ -278,6 +278,58 @@ TEST(broker_timeout, core_fail_timeout_with_traffic)
     Fed3->finalize();
 }
 
+// a broker that has handled one lost core must still notice the next one
+TEST(broker_timeout, core_fail_timeout_second_core)
+{
+    auto brk = helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--timeout=200ms --tick=50ms");
+    brk->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.coreName = "csecond1";
+    auto Fed1 = std::make_shared<helics::Federate>("test1", fedInfo);
+
+    fedInfo.coreName = "csecond2";
+    auto Fed2 = std::make_shared<helics::Federate>("test2", fedInfo);
+
+    fedInfo.coreName = "csecond3";
+    auto Fed3 = std::make_shared<helics::Federate>("test3", fedInfo);
+
+    Fed1->enterExecutingModeAsync();
+    Fed2->enterExecutingModeAsync();
+    Fed3->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+    Fed2->enterExecutingModeComplete();
+
+    // a clean disconnect first, so the lost cores are handled as disconnects
+    Fed1->finalize();
+
+    auto core2 = Fed2->getCorePointer();
+    auto tcr2 = std::dynamic_pointer_cast<helics::testcore::TestCore>(core2);
+    EXPECT_TRUE(tcr2);
+    tcr2->getCommsObjectPointer()->haltComms();
+    tcr2.reset();
+
+    // let the broker detect and drop the first lost core
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+    EXPECT_TRUE(brk->isConnected());
+
+    auto core3 = Fed3->getCorePointer();
+    auto tcr3 = std::dynamic_pointer_cast<helics::testcore::TestCore>(core3);
+    EXPECT_TRUE(tcr3);
+    tcr3->getCommsObjectPointer()->haltComms();
+    tcr3.reset();
+
+    bool val = brk->waitForDisconnect(std::chrono::milliseconds(3000));
+    EXPECT_TRUE(val);
+    if (!val) {
+        brk->disconnect();
+    }
+    core2->disconnect();
+    core3->disconnect();
+    Fed2->finalize();
+    Fed3->finalize();
+}
+
 TEST(broker_timeout, core_fail_error)
 {
     auto brk = helics::BrokerFactory::create(helics::CoreType::TEST, "--timeout=200ms --tick 50ms");
