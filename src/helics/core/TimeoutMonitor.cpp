@@ -120,6 +120,8 @@ void TimeoutMonitor::tick(CoreBroker* brk)
                 cerror.dest_id = brk->global_broker_id_local;
                 cerror.source_id = conn.connection;
                 brk->addActionMessage(cerror);
+                // report it once so the next ping round can check the other connections
+                conn.waitingForPingReply = false;
             } else {  // ping again
                 ActionMessage png(CMD_PING);
                 png.source_id = brk->global_broker_id_local;
