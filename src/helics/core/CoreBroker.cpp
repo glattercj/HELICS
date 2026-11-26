@@ -1771,6 +1771,17 @@ void CoreBroker::processInitCommand(ActionMessage& cmd)
                         enteredExecutionMode = true;
                     }
                 }
+            } else if (cmd.dest_id == global_broker_id_local &&
+                       getBrokerState() < BrokerState::OPERATING) {
+                // this broker joined a running federation, pass the grant on to the
+                // cores and brokers that asked to initialize
+                setBrokerState(BrokerState::OPERATING);
+                for (const auto& brk : mBrokers) {
+                    if (!brk._nonLocal && brk.state == ConnectionState::INIT_REQUESTED) {
+                        cmd.dest_id = brk.global_id;
+                        transmit(brk.route, cmd);
+                    }
+                }
             } else {
                 routeMessage(std::move(cmd));
             }
