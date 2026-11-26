@@ -605,6 +605,10 @@ iteration_time FederateState::enterExecutingMode(IterationRequest iterate, bool 
                     [this](ActionMessage&& mess) { this->addAction(std::move(mess)); });
             }
             start_clock_time = std::chrono::steady_clock::now();
+            // a federate joining late enters at a time >0 so anchor the clock to that time
+            if (time_granted > timeZero) {
+                start_clock_time -= time_granted.to_ns();
+            }
         } else if (grantTimeOutPeriod > timeZero) {
             if (!mTimer) {
                 mTimer = std::make_shared<MessageTimer>(
