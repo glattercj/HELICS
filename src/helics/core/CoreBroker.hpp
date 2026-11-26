@@ -140,6 +140,8 @@ class CoreBroker: public Broker, public BrokerBase {
     std::deque<std::pair<int32_t, decltype(std::chrono::steady_clock::now())>> queryTimeouts;
 
     std::vector<ActionMessage> earlyMessages;  //!< list of messages that came before connection
+    /// registrations of reentrant federates waiting to learn whether their old core is gone
+    std::vector<std::pair<GlobalBrokerId, ActionMessage>> heldRejoins;
     gmlc::concurrency::TriggerVariable disconnection;  //!< controller for the disconnection process
     /// class to handle timeouts and disconnection notices
     std::unique_ptr<TimeoutMonitor> timeoutMon;
@@ -362,6 +364,19 @@ class CoreBroker: public Broker, public BrokerBase {
     void disconnectTiming(ActionMessage& command);
     /** processBrokerDisconnect  */
     void processBrokerDisconnect(ActionMessage& command, BasicBrokerInfo* brk);
+    /** handle a lost broker or core as a disconnect and tell the higher brokers*/
+    void disconnectLostBroker(BasicBrokerInfo& brk);
+    /** hold the registration of a reentrant federate that is still active on another core until
+    a ping shows whether that core is gone*/
+    void holdRejoin(BasicBrokerInfo& oldCore, ActionMessage&& command);
+    /** refuse the held registrations for a core that answered a ping*/
+    void refuseHeldRejoins(GlobalBrokerId coreId);
+    /** drop the old connections of the held registrations for a lost core and register them;
+    returns true if the lost core is disconnected now*/
+    bool releaseHeldRejoins(BasicBrokerInfo& lost);
+    /** drop the old connection of a reentrant federate that registered again through another
+    core*/
+    void dropReplacedFederate(BasicFedInfo& fed);
     /** process an error message*/
     void processError(ActionMessage& command);
     /** disconnect a broker/core*/

@@ -14,6 +14,7 @@ namespace helics {
 class CommonCore;
 class CoreBroker;
 class ActionMessage;
+class BasicBrokerInfo;
 
 /** struct for managing the timeouts on the individual connections*/
 struct linkConnection {
@@ -38,6 +39,8 @@ class TimeoutMonitor {
     void reset();
     /** ping all a brokers sub connections*/
     void pingSub(CoreBroker* brk);
+    /** ping one connection of a broker now and report it lost if it does not answer in time*/
+    void pingConnection(CoreBroker* brk, const BasicBrokerInfo& conn);
     /** set the parent id*/
     void setParentId(GlobalBrokerId parent_id) { parentConnection.connection = parent_id; }
     /** set the "pingability" of a parent connection*/

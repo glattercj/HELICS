@@ -260,6 +260,8 @@ class BrokerBase {
     /** set tick forwarding for a specific reason*/
     void setTickForwarding(TickForwardingReasons reason, bool value = true);
     BrokerState getBrokerState() const { return brokerState.load(); }
+    /** check if the tick timer runs, which the connection timeouts need*/
+    bool isTimerRunning() const { return tickTimer > timeZero && !disable_timer; }
     bool setBrokerState(BrokerState newState);
     bool transitionBrokerState(BrokerState expectedState, BrokerState newState);
     /** process a disconnect signal*/
