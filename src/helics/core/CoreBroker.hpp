@@ -379,9 +379,9 @@ class CoreBroker: public Broker, public BrokerBase {
     /** drop the old connections of the held registrations for a lost core and register them;
     returns true if the lost core is disconnected now*/
     bool releaseHeldRejoins(BasicBrokerInfo& lost);
-    /** drop the old connection of a reentrant federate that registered again through another
-    core*/
-    void dropReplacedFederate(BasicFedInfo& fed);
+    /** drop the old registration of a reentrant federate that registers again through
+    newParent, and the old core if nothing else is left on it*/
+    void dropReplacedFederate(BasicFedInfo& fed, GlobalBrokerId newParent);
     /** process an error message*/
     void processError(ActionMessage& command);
     /** disconnect a broker/core*/
