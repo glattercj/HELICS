@@ -768,7 +768,8 @@ void CoreBroker::processPriorityCommand(ActionMessage&& command)
                     mFederates.addSearchTerm(command.dest_id, fed->name);
                 }
                 transmit(route, command);
-                routing_table.emplace(fed->global_id, route);
+                // a reentrant federate may come back on a new route
+                routing_table.insert_or_assign(fed->global_id, route);
                 if (enable_profiling) {
                     ActionMessage fedEnableProfiling(CMD_SET_PROFILER_FLAG,
                                                      global_broker_id_local,
@@ -781,7 +782,7 @@ void CoreBroker::processPriorityCommand(ActionMessage&& command)
                 mFederates.insert(command.name(), command.dest_id, command.name());
                 mFederates.back().route = getRoute(command.source_id);
                 mFederates.back().global_id = command.dest_id;
-                routing_table.emplace(fed->global_id, mFederates.back().route);
+                routing_table.emplace(mFederates.back().global_id, mFederates.back().route);
                 // it also means we don't forward it
             }
 
@@ -1233,6 +1234,14 @@ void CoreBroker::processCommand(ActionMessage&& command)
                                                 command.source_id.baseValue()));
                     if (lost != nullptr) {
                         disconnectLostBroker(*lost);
+                        if (lost->_nonLocal) {
+                            // let the subbroker it was connected through know it is gone
+                            ActionMessage gone(lost->_core ? CMD_DISCONNECT_CORE :
+                                                             CMD_DISCONNECT_BROKER);
+                            gone.source_id = lost->global_id;
+                            gone.dest_id = lost->global_id;
+                            transmit(lost->route, gone);
+                        }
                     } else {
                         command.setAction(CMD_DISCONNECT);
                         command.dest_id = parent_broker_id;
@@ -3370,6 +3379,13 @@ void CoreBroker::processError(ActionMessage& command)
     }
 
     if (command.source_id == parent_broker_id || command.source_id == gRootBrokerID) {
+        if (command.action() != CMD_GLOBAL_ERROR && !terminate_on_error &&
+            command.dest_id.isValid() && command.dest_id != global_broker_id_local &&
+            command.dest_id != parent_broker_id) {
+            // an error for a single federate or core below this broker
+            routeMessage(command);
+            return;
+        }
         setBrokerState(BrokerState::ERRORED);
         if (command.action() == CMD_GLOBAL_ERROR) {
             setErrorState(command.messageID, command.payload.to_string());
@@ -3546,7 +3562,12 @@ void CoreBroker::processDisconnectCommand(ActionMessage& command)
         case CMD_DISCONNECT_BROKER:
             if (brk != nullptr) {
                 disconnectBroker(*brk);
-                if (!isRootc) {
+                if (command.dest_id == brk->global_id) {
+                    // a higher broker dropped it; pass that down toward its parent
+                    if (brk->_nonLocal) {
+                        transmit(brk->route, command);
+                    }
+                } else if (!isRootc) {
                     transmit(parent_route_id, command);
                 }
             }
@@ -3611,9 +3632,18 @@ void CoreBroker::markAsDisconnected(GlobalBrokerId brkid)
 
         if (fed.parent == brkid) {
             if (fed.state != ConnectionState::ERROR_STATE) {
+                const bool wasConnected = fed.state < ConnectionState::DISCONNECTED;
                 fed.state = ConnectionState::DISCONNECTED;
                 if (fed.reentrant) {
                     handles.removeFederateHandles(fed.global_id);
+                    if (wasConnected && !isRootc && getBrokerState() == BrokerState::OPERATING) {
+                        // higher brokers only see the federate, so they need to drop its
+                        // interfaces too before it can come back
+                        ActionMessage dis(CMD_DISCONNECT_FED);
+                        dis.source_id = fed.global_id;
+                        dis.dest_id = parent_broker_id;
+                        transmit(parent_route_id, dis);
+                    }
                 }
             }
         }
