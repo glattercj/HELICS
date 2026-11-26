@@ -913,6 +913,9 @@ void BrokerBase::queueProcessingLoop()
 
     global_broker_id_local = global_id.load();
     int messagesSinceLastTick = 0;
+#ifndef DISABLE_TICK
+    auto lastConnectionCheck = std::chrono::steady_clock::now();
+#endif
     auto logDump = [&, this]() {
         if (!dumpMessages.empty()) {
             for (auto& act : dumpMessages) {
@@ -977,12 +980,20 @@ void BrokerBase::queueProcessingLoop()
                     break;
                 }
 #ifndef DISABLE_TICK
-                if (messagesSinceLastTick == 0) {
-                    command.messageID =
-                        forwardingReasons | static_cast<uint32_t>(TickForwardingReasons::NO_COMMS);
-                    processCommand(std::move(command));
-                } else if (forwardTick) {
-                    command.messageID = forwardingReasons;
+                {
+                    // traffic from some connections does not show that all of them are alive,
+                    // so the connection checks still run once per timeout period when busy
+                    auto tickTime = std::chrono::steady_clock::now();
+                    if (messagesSinceLastTick == 0 ||
+                        tickTime - lastConnectionCheck >= timeout.to_ms()) {
+                        lastConnectionCheck = tickTime;
+                        command.messageID = forwardingReasons |
+                            static_cast<uint32_t>(TickForwardingReasons::NO_COMMS);
+                        processCommand(std::move(command));
+                    } else if (forwardTick) {
+                        command.messageID = forwardingReasons;
+                        processCommand(std::move(command));
+                    }
                 }
 #endif
                 messagesSinceLastTick = 0;
