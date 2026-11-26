@@ -220,6 +220,35 @@ void TimeoutMonitor::pingSub(CoreBroker* brk)
     }
 }
 
+void TimeoutMonitor::pingConnection(CoreBroker* brk, const BasicBrokerInfo& conn)
+{
+    auto link = connections.begin();
+    while (link != connections.end() && link->connection != conn.global_id) {
+        ++link;
+    }
+    if (link == connections.end()) {
+        link = connections.emplace(connections.end());
+        link->connection = conn.global_id;
+        link->disablePing = conn._disable_ping;
+    }
+    if (!link->waitingForPingReply) {
+        link->activeConnection = true;
+        link->waitingForPingReply = true;
+        link->lastPing = std::chrono::steady_clock::now();
+    }
+    ActionMessage png(conn._core ? CMD_PING : CMD_BROKER_PING);
+    png.source_id = brk->global_broker_id_local;
+    png.dest_id = conn.global_id;
+    brk->transmit(conn.route, png);
+
+    ActionMessage tickf(CMD_BROKER_CONFIGURE);
+    tickf.dest_id = GlobalFederateId(brk->global_id);
+    tickf.source_id = GlobalFederateId(brk->global_id);
+    tickf.messageID = REQUEST_TICK_FORWARDING;
+    setActionFlag(tickf, indicator_flag);
+    brk->addActionMessage(tickf);
+}
+
 void TimeoutMonitor::reset()
 {
     parentConnection.waitingForPingReply = false;

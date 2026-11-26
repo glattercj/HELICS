@@ -6,6 +6,7 @@ SPDX-License-Identifier: BSD-3-Clause
 */
 
 #include "../application_api/testFixtures.hpp"
+#include "helics/common/JsonProcessingFunctions.hpp"
 #include "helics/core/core-exceptions.hpp"
 
 #include "gtest/gtest.h"
@@ -24,6 +25,18 @@ SPDX-License-Identifier: BSD-3-Clause
 #include <thread>
 
 #define CORE_TYPE_TO_TEST helics::CoreType::TEST
+
+// the state a broker reports for one of the cores it knows
+static std::string coreState(helics::Broker& brk, const std::string& coreName)
+{
+    auto state = helics::fileops::loadJsonStr(brk.query(brk.getIdentifier(), "current_state"));
+    for (const auto& core : state["cores"]) {
+        if (core["attributes"]["name"] == coreName) {
+            return core["state"].get<std::string>();
+        }
+    }
+    return "missing";
+}
 
 TEST(broker_timeout, configured_timeout_is_not_shortened)
 {
@@ -328,6 +341,157 @@ TEST(broker_timeout, core_fail_timeout_second_core)
     core3->disconnect();
     Fed2->finalize();
     Fed3->finalize();
+}
+
+// a reentrant federate that comes back on a new core before the broker has noticed that its old
+// core is gone replaces the old connection, and the later timeout is not an error
+TEST(broker_timeout, reentrant_rejoin_before_core_fail)
+{
+    auto brk =
+        helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--dynamic --timeout=2s --tick=200ms");
+    brk->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.setProperty(HELICS_PROPERTY_TIME_PERIOD, 1.0);
+    fedInfo.coreName = "cearly1";
+    auto Fed1 = std::make_shared<helics::ValueFederate>("test1", fedInfo);
+
+    fedInfo.coreName = "cearly2";
+    fedInfo.setFlagOption(HELICS_FLAG_REENTRANT);
+    auto Fed2 = std::make_shared<helics::ValueFederate>("test2", fedInfo);
+
+    Fed1->setFlagOption(HELICS_HANDLE_OPTION_RECONNECTABLE);
+    auto& in1 = Fed1->registerSubscription("early2");
+    Fed2->registerGlobalPublication<double>("early2");
+
+    Fed1->enterExecutingModeAsync();
+    Fed2->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+
+    auto core = Fed2->getCorePointer();
+    auto tcr = std::dynamic_pointer_cast<helics::testcore::TestCore>(core);
+    EXPECT_TRUE(tcr);
+    tcr->getCommsObjectPointer()->haltComms();  // this will terminate communications abruptly
+    tcr.reset();
+
+    // rejoin right away, well inside the broker timeout
+    fedInfo.coreName = "cearly3";
+    fedInfo.coreInitString = "--dynamic --broker=" + brk->getIdentifier();
+    std::unique_ptr<helics::ValueFederate> Fed2Redo;
+    EXPECT_NO_THROW(Fed2Redo = std::make_unique<helics::ValueFederate>("test2", fedInfo));
+    if (Fed2Redo) {
+        auto& pub2redo = Fed2Redo->registerGlobalPublication<double>("early2");
+        EXPECT_NO_THROW(Fed2Redo->enterExecutingMode());
+        if (Fed2Redo->getCurrentMode() == helics::Federate::Modes::EXECUTING) {
+            pub2redo.publish(-7.25);
+            Fed2Redo->requestTimeAsync(5.0);
+            helics::Time granted{helics::timeZero};
+            EXPECT_NO_THROW(granted = Fed1->requestTime(5.0));
+            EXPECT_GT(granted, helics::timeZero);
+            EXPECT_DOUBLE_EQ(in1.getDouble(), -7.25);
+            Fed2Redo->requestTimeComplete();
+        }
+        Fed2Redo->finalize();
+    }
+
+    // wait until the old core would have timed out
+    std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+    EXPECT_TRUE(brk->isConnected());
+    EXPECT_NO_THROW(Fed1->requestTime(10.0));
+    Fed1->finalize();
+    core->disconnect();
+    brk->disconnect();
+}
+
+// a second process with the same reentrant name is refused while the first one is still connected
+TEST(broker_timeout, reentrant_rejoin_while_connected)
+{
+    auto brk =
+        helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--dynamic --timeout=2s --tick=200ms");
+    brk->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.setProperty(HELICS_PROPERTY_TIME_PERIOD, 1.0);
+    fedInfo.coreName = "clive1";
+    auto Fed1 = std::make_shared<helics::ValueFederate>("test1", fedInfo);
+
+    fedInfo.coreName = "clive2";
+    fedInfo.setFlagOption(HELICS_FLAG_REENTRANT);
+    auto Fed2 = std::make_shared<helics::ValueFederate>("test2", fedInfo);
+
+    auto& in1 = Fed1->registerSubscription("live2");
+    auto& pub2 = Fed2->registerGlobalPublication<double>("live2");
+
+    Fed1->enterExecutingModeAsync();
+    Fed2->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+
+    fedInfo.coreName = "clive3";
+    fedInfo.coreInitString = "--dynamic --broker=" + brk->getIdentifier();
+    EXPECT_THROW(helics::ValueFederate("test2", fedInfo), helics::RegistrationFailure);
+
+    // the first one is untouched
+    pub2.publish(3.5);
+    Fed2->requestTimeAsync(2.0);
+    EXPECT_GT(Fed1->requestTime(2.0), helics::timeZero);
+    EXPECT_DOUBLE_EQ(in1.getDouble(), 3.5);
+    EXPECT_EQ(Fed2->requestTimeComplete(), 2.0);
+    Fed2->finalize();
+    Fed1->finalize();
+    brk->disconnect();
+}
+
+// a reentrant federate under a subbroker registers again through that subbroker on a new core
+// before its old core is found to be lost
+TEST(broker_timeout, reentrant_rejoin_before_core_fail_subbroker)
+{
+    auto brk =
+        helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--dynamic --timeout=30s --tick=200ms");
+    brk->connect();
+    auto sub = helics::BrokerFactory::create(CORE_TYPE_TO_TEST,
+                                             "--dynamic --timeout=2s --tick=200ms --broker=" +
+                                                 brk->getIdentifier());
+    sub->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.coreInitString = "--broker=" + brk->getIdentifier();
+    fedInfo.coreName = "csubearly1";
+    auto Fed1 = std::make_shared<helics::Federate>("test1", fedInfo);
+
+    fedInfo.coreInitString = "--broker=" + sub->getIdentifier();
+    fedInfo.coreName = "csubearly2";
+    fedInfo.setFlagOption(HELICS_FLAG_REENTRANT);
+    auto Fed2 = std::make_shared<helics::Federate>("test2", fedInfo);
+
+    Fed1->enterExecutingModeAsync();
+    Fed2->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+
+    auto core = Fed2->getCorePointer();
+    auto tcr = std::dynamic_pointer_cast<helics::testcore::TestCore>(core);
+    EXPECT_TRUE(tcr);
+    tcr->getCommsObjectPointer()->haltComms();  // this will terminate communications abruptly
+    tcr.reset();
+
+    fedInfo.coreName = "csubearly3";
+    fedInfo.coreInitString = "--dynamic --broker=" + sub->getIdentifier();
+    std::unique_ptr<helics::Federate> Fed2Redo;
+    EXPECT_NO_THROW(Fed2Redo = std::make_unique<helics::Federate>("test2", fedInfo));
+    if (Fed2Redo) {
+        EXPECT_NO_THROW(Fed2Redo->enterExecutingMode());
+    }
+    // the subbroker dropped the old core and told the root
+    EXPECT_EQ(coreState(*sub, "csubearly2"), "disconnected");
+    EXPECT_EQ(coreState(*brk, "csubearly2"), "disconnected");
+    EXPECT_TRUE(brk->isConnected());
+    EXPECT_NO_THROW(Fed1->requestTime(2.0));
+    if (Fed2Redo) {
+        Fed2Redo->finalize();
+    }
+    Fed1->finalize();
+    core->disconnect();
+    sub->disconnect();
+    brk->disconnect();
 }
 
 TEST(broker_timeout, core_fail_error)

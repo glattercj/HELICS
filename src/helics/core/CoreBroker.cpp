@@ -582,6 +582,19 @@ void CoreBroker::fedRegistration(ActionMessage&& command)
         auto fedLoc = mFederates.find(fedName);
         if (fedLoc != mFederates.end()) {
             if (fedLoc->reentrant) {
+                if (fedLoc->state < ConnectionState::ERROR_STATE &&
+                    fedLoc->parent != GlobalBrokerId(command.source_id)) {
+                    // it registers again before its old connection was found to be lost
+                    auto* oldCore = getBrokerById(fedLoc->parent);
+                    if (oldCore != nullptr && oldCore->_core) {
+                        if (oldCore->state >= ConnectionState::ERROR_STATE) {
+                            dropReplacedFederate(*fedLoc);
+                        } else if (isTimerRunning() && !oldCore->_disable_ping) {
+                            holdRejoin(*oldCore, std::move(command));
+                            return;
+                        }
+                    }
+                }
                 fedLoc->route = getRoute(command.source_id);
                 fedLoc->parent = command.source_id;
                 fedLoc->state = ConnectionState::CONNECTED;
@@ -1156,6 +1169,7 @@ void CoreBroker::processCommand(ActionMessage&& command)
         case CMD_PING_REPLY:
             if (command.dest_id == global_broker_id_local) {
                 timeoutMon->pingReply(command, this);
+                refuseHeldRejoins(GlobalBrokerId(command.source_id));
             } else {
                 routeMessage(command);
             }
@@ -1183,6 +1197,10 @@ void CoreBroker::processCommand(ActionMessage&& command)
                         ignore = true;
                         break;
                     }
+                }
+                auto* lost = getBrokerById(GlobalBrokerId(command.source_id));
+                if (lost != nullptr && releaseHeldRejoins(*lost)) {
+                    ignore = true;
                 }
                 if (ignore) {
                     break;
@@ -3595,6 +3613,112 @@ void CoreBroker::disconnectBroker(BasicBrokerInfo& brk)
             }
         }
     }
+}
+
+void CoreBroker::disconnectLostBroker(BasicBrokerInfo& brk)
+{
+    const bool operating = getBrokerState() == BrokerState::OPERATING;
+    const auto lostId = brk.global_id;
+    const bool lostCore = brk._core;
+    ActionMessage dis(CMD_DISCONNECT);
+    dis.source_id = lostId;
+    dis.dest_id = parent_broker_id;
+    setActionFlag(dis, error_flag);
+    processDisconnectCommand(dis);
+    if (!isRootc && operating) {
+        // higher brokers still see it as connected otherwise
+        ActionMessage lost(lostCore ? CMD_DISCONNECT_CORE : CMD_DISCONNECT_BROKER);
+        lost.source_id = lostId;
+        lost.dest_id = parent_broker_id;
+        transmit(parent_route_id, lost);
+    }
+}
+
+void CoreBroker::holdRejoin(BasicBrokerInfo& oldCore, ActionMessage&& command)
+{
+    LOG_CONNECTIONS(global_broker_id_local,
+                    getIdentifier(),
+                    fmt::format("federate {} registered again, checking its connection through {}",
+                                command.name(),
+                                oldCore.global_id.baseValue()));
+    heldRejoins.emplace_back(oldCore.global_id, std::move(command));
+    timeoutMon->pingConnection(this, oldCore);
+}
+
+void CoreBroker::refuseHeldRejoins(GlobalBrokerId coreId)
+{
+    auto held = heldRejoins.begin();
+    while (held != heldRejoins.end()) {
+        if (held->first != coreId) {
+            ++held;
+            continue;
+        }
+        LOG_WARNING(global_broker_id_local,
+                    getIdentifier(),
+                    fmt::format("federate {} is still connected through {}, refusing to register "
+                                "it again",
+                                held->second.name(),
+                                coreId.baseValue()));
+        sendFedErrorAck(held->second, duplicate_federate_name_error_code);
+        held = heldRejoins.erase(held);
+    }
+}
+
+bool CoreBroker::releaseHeldRejoins(BasicBrokerInfo& lost)
+{
+    std::vector<ActionMessage> rejoins;
+    auto held = heldRejoins.begin();
+    while (held != heldRejoins.end()) {
+        if (held->first == lost.global_id) {
+            rejoins.push_back(std::move(held->second));
+            held = heldRejoins.erase(held);
+        } else {
+            ++held;
+        }
+    }
+    if (rejoins.empty()) {
+        return false;
+    }
+    for (const auto& rejoin : rejoins) {
+        auto fed = mFederates.find(rejoin.name());
+        if (fed != mFederates.end() && fed->state < ConnectionState::ERROR_STATE &&
+            fed->parent == lost.global_id) {
+            dropReplacedFederate(*fed);
+        }
+    }
+    for (auto& rejoin : rejoins) {
+        fedRegistration(std::move(rejoin));
+    }
+    return lost.state >= ConnectionState::ERROR_STATE;
+}
+
+void CoreBroker::dropReplacedFederate(BasicFedInfo& fed)
+{
+    LOG_CONNECTIONS(global_broker_id_local,
+                    getIdentifier(),
+                    fmt::format("federate {} registered again, dropping its connection through {}",
+                                fed.name,
+                                fed.parent.baseValue()));
+    fed.state = ConnectionState::DISCONNECTED;
+    handles.removeFederateHandles(fed.global_id);
+    if (!isRootc) {
+        // higher brokers hold its interfaces too
+        ActionMessage disFed(CMD_DISCONNECT_FED);
+        disFed.source_id = fed.global_id;
+        disFed.dest_id = parent_broker_id;
+        transmit(parent_route_id, disFed);
+    }
+    auto* brk = getBrokerById(fed.parent);
+    if (brk == nullptr || !brk->_core || brk->state >= ConnectionState::ERROR_STATE) {
+        return;
+    }
+    for (const auto& other : mFederates) {
+        if (other.parent == brk->global_id && other.state < ConnectionState::ERROR_STATE) {
+            return;
+        }
+    }
+    // nothing is left on the old core, so it is gone as well
+    disconnectLostBroker(*brk);
 }
 
 void CoreBroker::setLoggingLevel(int logLevel)
