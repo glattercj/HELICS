@@ -208,7 +208,10 @@ void ValueFederate::registerValueInterfaces(const std::string& configString)
 static constexpr std::string_view emptyStr;
 
 template<class Inp, class Obj>
-static void loadOptions(ValueFederate* fed, const Inp& data, Obj& objUpdate)
+static void loadOptions(ValueFederate* fed,
+                        const Inp& data,
+                        Obj& objUpdate,
+                        std::string_view firstTarget = {})
 {
     using fileops::getOrDefault;
 
@@ -226,6 +229,10 @@ static void loadOptions(ValueFederate* fed, const Inp& data, Obj& objUpdate)
         [](const std::string& option) { return getOptionIndex(option); },
         [](const std::string& value) { return getOptionValue(value); },
         [&objUpdate](int32_t option, int32_t value) { objUpdate.setOption(option, value); });
+    // the core sends the interface flags along with a target, so options must be set first
+    if (!firstTarget.empty()) {
+        objUpdate.addTarget(firstTarget);
+    }
 
     fileops::callIfMember(data, "alias", [&objUpdate, fed](std::string_view val) {
         fed->addAlias(objUpdate, val);
@@ -297,6 +304,7 @@ void ValueFederate::registerValueInterfacesJsonDetail(const fileops::JsonBuffer&
                 skipNameTarget = true;
             }
             auto* subAct = &vfManager->getInputByTarget(name);
+            std::string_view nameTarget;
             if (!subAct->isValid()) {
                 auto type = fileops::getOrDefault(sub, "type", emptyStr);
                 auto units = fileops::getOrDefault(sub, "unit", emptyStr);
@@ -304,14 +312,14 @@ void ValueFederate::registerValueInterfacesJsonDetail(const fileops::JsonBuffer&
                 subAct = &registerInput(emptyStr, type, units);
                 if (!skipNameTarget) {
                     // this check is to prevent some warnings since targets get added later
-                    subAct->addTarget(name);
+                    nameTarget = name;
                 }
             }
             auto defStr = fileops::getOrDefault(sub, "default", emptyStr);
             if (!defStr.empty()) {
                 subAct->setDefault(defStr);
             }
-            loadOptions(this, sub, *subAct);
+            loadOptions(this, sub, *subAct, nameTarget);
             auto addSourceTarget = [subAct](const std::string& target) {
                 subAct->addSourceTarget(target);
             };
@@ -416,6 +424,7 @@ void ValueFederate::registerValueInterfacesToml(const std::string& tomlString)
                 skipNameTarget = true;
             }
             Input* inp = &vfManager->getInputByTarget(name);
+            std::string_view nameTarget;
             if (!inp->isValid()) {
                 auto type = getOrDefault(sub, "type", emptyStr);
                 auto units = getOrDefault(sub, "unit", emptyStr);
@@ -424,14 +433,14 @@ void ValueFederate::registerValueInterfacesToml(const std::string& tomlString)
                 inp = &registerInput(emptyStr, type, units);
                 if (!skipNameTarget) {
                     // this check is to prevent some warnings since targets get added later
-                    inp->addTarget(name);
+                    nameTarget = name;
                 }
             }
             auto defStr = fileops::getOrDefault(sub, "default", emptyStr);
             if (!defStr.empty()) {
                 inp->setDefault(defStr);
             }
-            loadOptions(this, sub, *inp);
+            loadOptions(this, sub, *inp, nameTarget);
             auto addDestTarget = [inp](const std::string& target) { inp->addSourceTarget(target); };
             addTargetVariations(sub, "source", "publications", addDestTarget);
             addTargetVariations(sub, "source", "targets", addDestTarget);
