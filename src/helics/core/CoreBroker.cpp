@@ -588,12 +588,21 @@ void CoreBroker::fedRegistration(ActionMessage&& command)
                     auto* oldCore = getBrokerById(fedLoc->parent);
                     if (oldCore != nullptr && oldCore->_core) {
                         if (oldCore->state >= ConnectionState::ERROR_STATE) {
-                            dropReplacedFederate(*fedLoc);
+                            dropReplacedFederate(*fedLoc, GlobalBrokerId(command.source_id));
                         } else if (isTimerRunning() && !oldCore->_disable_ping) {
                             holdRejoin(*oldCore, std::move(command));
                             return;
                         }
                     }
+                }
+                if (fedLoc->state < ConnectionState::ERROR_STATE) {
+                    if (fedLoc->parent != GlobalBrokerId(command.source_id)) {
+                        // nothing shows that the old instance is gone
+                        sendFedErrorAck(command, duplicate_federate_name_error_code);
+                        return;
+                    }
+                    // the connection it comes through has already dropped the old instance
+                    dropReplacedFederate(*fedLoc, GlobalBrokerId(command.source_id));
                 }
                 fedLoc->route = getRoute(command.source_id);
                 fedLoc->parent = command.source_id;
@@ -3823,7 +3832,7 @@ bool CoreBroker::releaseHeldRejoins(BasicBrokerInfo& lost)
         auto fed = mFederates.find(rejoin.name());
         if (fed != mFederates.end() && fed->state < ConnectionState::ERROR_STATE &&
             fed->parent == lost.global_id) {
-            dropReplacedFederate(*fed);
+            dropReplacedFederate(*fed, GlobalBrokerId(rejoin.source_id));
         }
     }
     for (auto& rejoin : rejoins) {
@@ -3832,7 +3841,7 @@ bool CoreBroker::releaseHeldRejoins(BasicBrokerInfo& lost)
     return lost.state >= ConnectionState::ERROR_STATE;
 }
 
-void CoreBroker::dropReplacedFederate(BasicFedInfo& fed)
+void CoreBroker::dropReplacedFederate(BasicFedInfo& fed, GlobalBrokerId newParent)
 {
     LOG_CONNECTIONS(global_broker_id_local,
                     getIdentifier(),
@@ -3848,6 +3857,10 @@ void CoreBroker::dropReplacedFederate(BasicFedInfo& fed)
         disFed.dest_id = parent_broker_id;
         disFed.counter = fed.registration;
         transmit(parent_route_id, disFed);
+    }
+    if (fed.parent == newParent) {
+        // it comes back through the same connection, which stays
+        return;
     }
     auto* brk = getBrokerById(fed.parent);
     if (brk == nullptr || !brk->_core || brk->state >= ConnectionState::ERROR_STATE) {
