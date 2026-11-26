@@ -1203,21 +1203,42 @@ void CoreBroker::processCommand(ActionMessage&& command)
                     ignore = true;
                 }
                 if (ignore) {
+                    if (!isRootc && lost != nullptr && getBrokerState() == BrokerState::OPERATING) {
+                        // a higher broker that asks about it may not know it is gone
+                        ActionMessage gone(lost->_core ? CMD_DISCONNECT_CORE :
+                                                         CMD_DISCONNECT_BROKER);
+                        gone.source_id = lost->global_id;
+                        gone.dest_id = parent_broker_id;
+                        transmit(parent_route_id, gone);
+                    }
+                    break;
+                }
+                // set when a lower broker has already found the loss to be an error
+                const bool lostError = checkActionFlag(command, error_flag);
+                if (!lostError && !partDisconnected && lost != nullptr && lost->_nonLocal) {
+                    // only the broker it is connected through knows which federates it had
+                    command.dest_id = lost->parent;
+                    transmit(lost->route, command);
                     break;
                 }
                 // a reentrant federate can rejoin later so losing it is not an error
-                if (partDisconnected ||
-                    hasOnlyReentrantFederates(GlobalBrokerId(command.source_id))) {
+                if (!lostError &&
+                    (partDisconnected ||
+                     hasOnlyReentrantFederates(GlobalBrokerId(command.source_id)))) {
                     // we are going to assume it disconnected just assume broker even though it
                     // may be a core, there probably isn't any difference for this purpose
                     LOG_CONNECTIONS(global_broker_id_local,
                                     getIdentifier(),
                                     fmt::format("disconnecting {} from communication timeout",
                                                 command.source_id.baseValue()));
-                    command.setAction(CMD_DISCONNECT);
-                    command.dest_id = parent_broker_id;
-                    setActionFlag(command, error_flag);
-                    processDisconnectCommand(command);
+                    if (lost != nullptr) {
+                        disconnectLostBroker(*lost);
+                    } else {
+                        command.setAction(CMD_DISCONNECT);
+                        command.dest_id = parent_broker_id;
+                        setActionFlag(command, error_flag);
+                        processDisconnectCommand(command);
+                    }
                 } else {
                     if (isRootc) {
                         const std::string lcom =
@@ -1233,7 +1254,8 @@ void CoreBroker::processCommand(ActionMessage&& command)
                         // what is needed for now
                     } else {
                         // pass it up the chain let the root deal with it
-                        command.dest_id = parent_broker_id;
+                        setActionFlag(command, error_flag);
+                        command.dest_id = higher_broker_id;
                         transmit(parent_route_id, command);
                     }
                 }

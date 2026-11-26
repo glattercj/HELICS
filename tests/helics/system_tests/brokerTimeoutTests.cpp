@@ -585,6 +585,85 @@ TEST(broker_timeout, reentrant_core_fail_rejoin)
     brk->disconnect();
 }
 
+// lose the core of one federate under a subbroker that also holds a federate on another core;
+// subArgs sets the subbroker timers: with its default 30 s timeout only the root can see the loss
+// within the test, with a shorter one than the root the subbroker sees it first
+static void
+    loseCoreUnderSubbroker(const std::string& tag, const std::string& subArgs, bool reentrant)
+{
+    auto brk =
+        helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--dynamic --timeout=1s --tick=200ms");
+    brk->connect();
+    auto sub =
+        helics::BrokerFactory::create(CORE_TYPE_TO_TEST,
+                                      "--dynamic --broker=" + brk->getIdentifier() + " " + subArgs);
+    sub->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.coreInitString = "--broker=" + brk->getIdentifier();
+    fedInfo.coreName = "csubroot" + tag;
+    auto Fed1 = std::make_shared<helics::Federate>("test1", fedInfo);
+
+    fedInfo.coreInitString = "--broker=" + sub->getIdentifier();
+    fedInfo.coreName = "csubother" + tag;
+    auto Fed3 = std::make_shared<helics::Federate>("test3", fedInfo);
+
+    fedInfo.coreName = "csublost" + tag;
+    if (reentrant) {
+        fedInfo.setFlagOption(HELICS_FLAG_REENTRANT);
+    }
+    auto Fed2 = std::make_shared<helics::Federate>("test2", fedInfo);
+
+    Fed1->enterExecutingModeAsync();
+    Fed3->enterExecutingModeAsync();
+    Fed2->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+    Fed3->enterExecutingModeComplete();
+
+    auto core = Fed2->getCorePointer();
+    auto tcr = std::dynamic_pointer_cast<helics::testcore::TestCore>(core);
+    EXPECT_TRUE(tcr);
+    tcr->getCommsObjectPointer()->haltComms();  // this will terminate communications abruptly
+    tcr.reset();
+
+    if (reentrant) {
+        // give the brokers time to detect the lost core
+        std::this_thread::sleep_for(std::chrono::milliseconds(3000));
+        EXPECT_TRUE(brk->isConnected());
+        EXPECT_TRUE(sub->isConnected());
+        EXPECT_EQ(coreState(*brk, "csublost" + tag), "disconnected");
+        EXPECT_EQ(coreState(*sub, "csublost" + tag), "disconnected");
+    } else {
+        EXPECT_TRUE(brk->waitForDisconnect(std::chrono::milliseconds(5000)));
+    }
+    Fed1->finalize();
+    Fed3->finalize();
+    core->disconnect();
+    sub->disconnect();
+    brk->disconnect();
+}
+
+// a lost core whose federates are all reentrant is a disconnect also under a subbroker, even
+// though another federate of that subbroker is not reentrant
+TEST(broker_timeout, reentrant_core_fail_subbroker)
+{
+    // only the root can see the loss
+    loseCoreUnderSubbroker("rt", "", true);
+}
+
+TEST(broker_timeout, reentrant_core_fail_subbroker_detects)
+{
+    // the subbroker sees the loss first
+    loseCoreUnderSubbroker("st", "--timeout=300ms --tick=100ms", true);
+}
+
+// losing a core with a federate that is not reentrant under a subbroker still errors
+TEST(broker_timeout, core_fail_subbroker_error)
+{
+    loseCoreUnderSubbroker("re", "", false);
+    loseCoreUnderSubbroker("se", "--timeout=300ms --tick=100ms", false);
+}
+
 #ifdef HELICS_ENABLE_ZMQ_CORE
 TEST(broker_timeout, maintain_connection_ci_skip)
 {
