@@ -17,6 +17,7 @@ SPDX-License-Identifier: BSD-3-Clause
 #include "helics/network/test/TestComms.h"
 #include "helics/network/test/TestCore.h"
 
+#include <atomic>
 #include <future>
 #include <memory>
 #include <string>
@@ -207,6 +208,74 @@ TEST(broker_timeout, core_fail_timeout_no_timer_ci_skip)
     core->disconnect();
     Fed1->finalize();
     Fed2->finalize();
+}
+
+// a broker that never sees an idle tick must still notice a core that stopped responding
+TEST(broker_timeout, core_fail_timeout_with_traffic)
+{
+    auto brk = helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--timeout=1s --tick=500ms");
+    brk->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.setProperty(HELICS_PROPERTY_TIME_PERIOD, 1.0);
+    fedInfo.coreName = "ctraffic1";
+    auto Fed1 = std::make_shared<helics::ValueFederate>("test1", fedInfo);
+
+    fedInfo.coreName = "ctraffic2";
+    auto Fed2 = std::make_shared<helics::ValueFederate>("test2", fedInfo);
+
+    fedInfo.coreName = "ctraffic3";
+    auto Fed3 = std::make_shared<helics::Federate>("test3", fedInfo);
+
+    auto& pub1 = Fed1->registerGlobalPublication<double>("traffic1");
+    auto& pub2 = Fed2->registerGlobalPublication<double>("traffic2");
+    Fed1->registerSubscription("traffic2");
+    Fed2->registerSubscription("traffic1");
+
+    Fed1->enterExecutingModeAsync();
+    Fed2->enterExecutingModeAsync();
+    Fed3->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+    Fed2->enterExecutingModeComplete();
+
+    // keep values and time messages flowing through the broker in every tick period
+    std::atomic<bool> stop{false};
+    auto traffic = [&stop](helics::ValueFederate* fed, helics::Publication* pub) {
+        try {
+            while (!stop.load()) {
+                pub->publish(fed->getCurrentTime());
+                fed->requestNextStep();
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+        catch (const helics::HelicsException&) {
+            // the federation errors once the lost core is detected
+        }
+    };
+    std::thread traffic1(traffic, Fed1.get(), &pub1);
+    std::thread traffic2(traffic, Fed2.get(), &pub2);
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    auto core = Fed3->getCorePointer();
+    auto tcr = std::dynamic_pointer_cast<helics::testcore::TestCore>(core);
+    EXPECT_TRUE(tcr);
+
+    auto cms = tcr->getCommsObjectPointer();
+    cms->haltComms();  // this will terminate communications abruptly
+    tcr.reset();
+
+    bool val = brk->waitForDisconnect(std::chrono::milliseconds(6000));
+    EXPECT_TRUE(val);
+    stop.store(true);
+    if (!val) {
+        brk->disconnect();
+    }
+    traffic1.join();
+    traffic2.join();
+    core->disconnect();
+    Fed1->finalize();
+    Fed2->finalize();
+    Fed3->finalize();
 }
 
 TEST(broker_timeout, core_fail_error)

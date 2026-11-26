@@ -1124,7 +1124,9 @@ void CoreBroker::processCommand(ActionMessage&& command)
             break;
 
         case CMD_TICK:
-            if (getBrokerState() == BrokerState::OPERATING) {
+            if (getBrokerState() == BrokerState::OPERATING &&
+                (isReasonForTick(command.messageID, TickForwardingReasons::NO_COMMS) ||
+                 isReasonForTick(command.messageID, TickForwardingReasons::PING_RESPONSE))) {
                 timeoutMon->tick(this);
                 LOG_SUMMARY(global_broker_id_local, getIdentifier(), " broker tick");
             }
@@ -1780,9 +1782,9 @@ void CoreBroker::processBrokerConfigureCommands(ActionMessage& cmd)
             setLoggingFile(cmd.payload.to_string());
             break;
         case REQUEST_TICK_FORWARDING:
-            if (checkActionFlag(cmd, indicator_flag)) {
-                setTickForwarding(TickForwardingReasons::PING_RESPONSE, true);
-            }
+            // the timeout monitor sends this without the flag once all ping replies are in
+            setTickForwarding(TickForwardingReasons::PING_RESPONSE,
+                              checkActionFlag(cmd, indicator_flag));
             break;
         default:
             break;
