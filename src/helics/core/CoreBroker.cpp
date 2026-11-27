@@ -1238,6 +1238,17 @@ void CoreBroker::processCommand(ActionMessage&& command)
                 }
                 // set when a lower broker has already found the loss to be an error
                 const bool lostError = checkActionFlag(command, error_flag);
+                // set when a higher broker asks for the loss to be handled as a disconnect
+                const bool disconnectLost =
+                    disconnectOnLostConnection || checkActionFlag(command, indicator_flag);
+                if (disconnectLost && lost != nullptr && lost->_nonLocal) {
+                    // the broker it is connected through knows its federates
+                    clearActionFlag(command, error_flag);
+                    setActionFlag(command, indicator_flag);
+                    command.dest_id = lost->parent;
+                    transmit(lost->route, command);
+                    break;
+                }
                 if (!lostError && !partDisconnected && lost != nullptr && lost->_nonLocal) {
                     // only the broker it is connected through knows which federates it had
                     command.dest_id = lost->parent;
@@ -1245,9 +1256,10 @@ void CoreBroker::processCommand(ActionMessage&& command)
                     break;
                 }
                 // a reentrant federate can rejoin later so losing it is not an error
-                if (!lostError &&
-                    (partDisconnected ||
-                     hasOnlyReentrantFederates(GlobalBrokerId(command.source_id)))) {
+                if (disconnectLost ||
+                    (!lostError &&
+                     (partDisconnected ||
+                      hasOnlyReentrantFederates(GlobalBrokerId(command.source_id))))) {
                     // we are going to assume it disconnected just assume broker even though it
                     // may be a core, there probably isn't any difference for this purpose
                     LOG_CONNECTIONS(global_broker_id_local,
@@ -1255,6 +1267,9 @@ void CoreBroker::processCommand(ActionMessage&& command)
                                     fmt::format("disconnecting {} from communication timeout",
                                                 command.source_id.baseValue()));
                     if (lost != nullptr) {
+                        if (disconnectLost) {
+                            disconnectLostFederates(lost->global_id);
+                        }
                         disconnectLostBroker(*lost);
                         if (lost->_nonLocal) {
                             // let the subbroker it was connected through know it is gone
@@ -1418,6 +1433,9 @@ void CoreBroker::processCommand(ActionMessage&& command)
                 command.setAction(CMD_BROADCAST_DISCONNECT);
                 broadcast(command);
                 unknownHandles.clearFederateUnknowns(command.source_id);
+            } else if (checkActionFlag(command, error_flag)) {
+                // a lower broker lost the connection to this federate
+                sendLostFederateDisconnect(command.source_id);
             }
             registerFreedRejoins();
         } break;
@@ -3742,6 +3760,56 @@ bool CoreBroker::hasOnlyReentrantFederates(GlobalBrokerId brkid) const
         found = true;
     }
     return found;
+}
+
+void CoreBroker::disconnectLostFederates(GlobalBrokerId brkid)
+{
+    std::vector<GlobalBrokerId> ids{brkid};
+    for (std::size_t ii = 0; ii < ids.size(); ++ii) {
+        for (const auto& brk : mBrokers) {
+            if (brk.parent == ids[ii] && brk.global_id != ids[ii]) {
+                ids.push_back(brk.global_id);
+            }
+        }
+    }
+    std::vector<GlobalFederateId> lostFeds;
+    for (size_t ii = 0; ii < mFederates.size(); ++ii) {  // NOLINT
+        auto& fed = mFederates[ii];
+        if (fed.state < ConnectionState::ERROR_STATE &&
+            std::find(ids.begin(), ids.end(), fed.parent) != ids.end()) {
+            fed.state = ConnectionState::DISCONNECTED;
+            lostFeds.push_back(fed.global_id);
+        }
+    }
+    for (const auto fedid : lostFeds) {
+        LOG_CONNECTIONS(global_broker_id_local,
+                        getIdentifier(),
+                        fmt::format("disconnecting federate {} of lost connection {}",
+                                    fedid.baseValue(),
+                                    brkid.baseValue()));
+        if (isRootc) {
+            sendLostFederateDisconnect(fedid);
+        } else {
+            // only the root knows all the federates that may depend on it
+            ActionMessage disFed(CMD_DISCONNECT_FED);
+            disFed.source_id = fedid;
+            disFed.dest_id = parent_broker_id;
+            setActionFlag(disFed, error_flag);
+            transmit(parent_route_id, disFed);
+        }
+    }
+}
+
+void CoreBroker::sendLostFederateDisconnect(GlobalFederateId fedid)
+{
+    // the lost federate cannot send its own time disconnect, so its dependents would wait for it
+    for (const auto& fed : mFederates) {
+        if (fed.global_id == fedid || fed.state >= ConnectionState::ERROR_STATE) {
+            continue;
+        }
+        ActionMessage dis(CMD_DISCONNECT, fedid, fed.global_id);
+        transmit(fed.route, dis);
+    }
 }
 
 void CoreBroker::disconnectBroker(BasicBrokerInfo& brk)
