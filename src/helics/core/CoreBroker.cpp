@@ -160,6 +160,34 @@ route_id CoreBroker::getRoute(GlobalFederateId fedid) const
                                           parent_route_id;  // zero is the default route
 }
 
+bool CoreBroker::dropForDisconnectedDestination(const ActionMessage& command)
+{
+    if (command.dest_id.isFederate()) {
+        auto fed = mFederates.find(command.dest_id);
+        if (fed == mFederates.end() || fed->state != ConnectionState::DISCONNECTED) {
+            return false;
+        }
+    } else if (command.action() == CMD_PING && command.dest_id.isBroker() &&
+               command.dest_id != global_broker_id_local) {
+        // a ping to a core or broker that has left gets no reply anyway; the sender's timeout
+        // handles it
+        const auto* brk = getBrokerById(GlobalBrokerId(command.dest_id));
+        if (brk == nullptr || brk->state != ConnectionState::DISCONNECTED) {
+            return false;
+        }
+    } else {
+        return false;
+    }
+    // nothing would take it; a broker with no route left for the destination sends the message
+    // to its parent, which routes it straight back down
+    LOG_DEBUG_MESSAGES(global_broker_id_local,
+                       getIdentifier(),
+                       fmt::format("dropping {}, {} has disconnected",
+                                   prettyPrintString(command),
+                                   command.dest_id.baseValue()));
+    return true;
+}
+
 BasicBrokerInfo* CoreBroker::getBrokerById(GlobalBrokerId brokerid)
 {
     if (isRootc) {
@@ -1118,6 +1146,9 @@ void CoreBroker::processCommand(ActionMessage&& command)
                           prettyPrintString(command),
                           command.source_id.baseValue(),
                           command.dest_id.baseValue()));
+    if (dropForDisconnectedDestination(command)) {
+        return;
+    }
     switch (command.action()) {
         case CMD_IGNORE:
         case CMD_PROTOCOL:
@@ -4295,7 +4326,7 @@ void CoreBroker::processQueryCommand(ActionMessage& cmd)
         case CMD_QUERY_REPLY_ORDERED:
             if (cmd.dest_id == global_broker_id_local) {
                 processQueryResponse(cmd);
-            } else {
+            } else if (!dropForDisconnectedDestination(cmd)) {
                 transmit(getRoute(cmd.dest_id), cmd);
             }
             break;
@@ -4638,7 +4669,7 @@ void CoreBroker::processCommandInstruction(ActionMessage& message)
                 }
             }
         }
-    } else {
+    } else if (!dropForDisconnectedDestination(message)) {
         transmit(getRoute(message.dest_id), std::move(message));
     }
 }
