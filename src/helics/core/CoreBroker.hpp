@@ -433,6 +433,9 @@ class CoreBroker: public Broker, public BrokerBase {
     route_id getRoute(GlobalFederateId fedid) const;
     /** locate the route to take to a particular federate*/
     route_id getRoute(int32_t fedid) const { return getRoute(GlobalFederateId(fedid)); }
+    /** check if a command is addressed to a federate that has disconnected, or is a ping to a core
+    or broker that has disconnected, and log that it is dropped*/
+    bool dropForDisconnectedDestination(const ActionMessage& command);
 
     const BasicBrokerInfo* getBrokerById(GlobalBrokerId brokerid) const;
 
