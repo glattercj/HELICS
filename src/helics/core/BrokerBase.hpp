@@ -156,6 +156,8 @@ class BrokerBase {
     bool errorOnUnmatchedConnections{false};
     bool globalDisconnect{false};  //!< if true specify that federates should stay connected until a
                                    //!< global disconnect operation
+    /// handle a lost connection as a disconnect of its federates instead of an error
+    bool disconnectOnLostConnection{false};
     /// time when the error condition started; related to the errorDelay
     decltype(std::chrono::steady_clock::now()) errorTimeStart;
     /// time when the disconnect started

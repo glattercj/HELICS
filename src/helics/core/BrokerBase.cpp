@@ -250,6 +250,10 @@ std::shared_ptr<helicsCLI11App> BrokerBase::generateBaseCLI()
                    terminate_on_error,
                    "specify that a broker should cause the federation to terminate on an error");
     hApp->add_flag(
+        "--disconnect_on_lost_connection",
+        disconnectOnLostConnection,
+        "specify that a broker should handle a lost connection to a core or broker as a disconnect of its federates instead of an error, so the rest of the federation keeps running (ignored in cores)");
+    hApp->add_flag(
         "--error_on_unmatched",
         errorOnUnmatchedConnections,
         "set the broker to terminate the cosimulation if there are unmatched connections");

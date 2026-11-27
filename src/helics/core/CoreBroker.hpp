@@ -366,6 +366,10 @@ class CoreBroker: public Broker, public BrokerBase {
     void processBrokerDisconnect(ActionMessage& command, BasicBrokerInfo* brk);
     /** handle a lost broker or core as a disconnect and tell the higher brokers*/
     void disconnectLostBroker(BasicBrokerInfo& brk);
+    /** tell the other federates that the federates of a lost broker or core are gone*/
+    void disconnectLostFederates(GlobalBrokerId brkid);
+    /** send a time disconnect for a lost federate to every other federate*/
+    void sendLostFederateDisconnect(GlobalFederateId fedid);
     /** hold the registration of a reentrant federate that is still active on another core until
     a ping shows whether that core is gone*/
     void holdRejoin(BasicBrokerInfo& oldCore, ActionMessage&& command);
