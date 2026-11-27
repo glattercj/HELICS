@@ -371,6 +371,9 @@ class CoreBroker: public Broker, public BrokerBase {
     void holdRejoin(BasicBrokerInfo& oldCore, ActionMessage&& command);
     /** refuse the held registrations for a core that answered a ping*/
     void refuseHeldRejoins(GlobalBrokerId coreId);
+    /** register the held registrations whose federate is no longer connected through the core it
+    was held for*/
+    void registerFreedRejoins();
     /** drop the old connections of the held registrations for a lost core and register them;
     returns true if the lost core is disconnected now*/
     bool releaseHeldRejoins(BasicBrokerInfo& lost);

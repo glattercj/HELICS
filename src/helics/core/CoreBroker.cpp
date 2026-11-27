@@ -1377,6 +1377,7 @@ void CoreBroker::processCommand(ActionMessage&& command)
                 broadcast(command);
                 unknownHandles.clearFederateUnknowns(command.source_id);
             }
+            registerFreedRejoins();
         } break;
         case CMD_STOP:
             if ((getAllConnectionState() <
@@ -3457,6 +3458,7 @@ void CoreBroker::processBrokerDisconnect(ActionMessage& command, BasicBrokerInfo
                                     brk->name,
                                     command.source_id.baseValue()));
         disconnectBroker(*brk);
+        registerFreedRejoins();
     }
 
     if ((getAllConnectionState() >= ConnectionState::DISCONNECTED)) {
@@ -3696,6 +3698,8 @@ void CoreBroker::holdRejoin(BasicBrokerInfo& oldCore, ActionMessage&& command)
 
 void CoreBroker::refuseHeldRejoins(GlobalBrokerId coreId)
 {
+    // a disconnect may have come in before the reply
+    registerFreedRejoins();
     auto held = heldRejoins.begin();
     while (held != heldRejoins.end()) {
         if (held->first != coreId) {
@@ -3710,6 +3714,25 @@ void CoreBroker::refuseHeldRejoins(GlobalBrokerId coreId)
                                 coreId.baseValue()));
         sendFedErrorAck(held->second, duplicate_federate_name_error_code);
         held = heldRejoins.erase(held);
+    }
+}
+
+void CoreBroker::registerFreedRejoins()
+{
+    std::vector<ActionMessage> rejoins;
+    auto held = heldRejoins.begin();
+    while (held != heldRejoins.end()) {
+        auto fed = mFederates.find(held->second.name());
+        if (fed == mFederates.end() || fed->state >= ConnectionState::ERROR_STATE ||
+            fed->parent != held->first) {
+            rejoins.push_back(std::move(held->second));
+            held = heldRejoins.erase(held);
+        } else {
+            ++held;
+        }
+    }
+    for (auto& rejoin : rejoins) {
+        fedRegistration(std::move(rejoin));
     }
 }
 
