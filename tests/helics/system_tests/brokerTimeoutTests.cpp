@@ -1228,6 +1228,122 @@ TEST(broker_timeout, reentrant_fed_disconnect_after_registration_under_subbroker
     brk->disconnect();
 }
 
+// a dynamic subbroker is told by the root that its only core is lost; it stays up for the federate
+// to rejoin through it and leaves once the rest of the federation is done
+static void loseOnlyCoreOfSubbroker(const std::string& tag, bool rejoin)
+{
+    auto brk = helics::BrokerFactory::create(CORE_TYPE_TO_TEST,
+                                             "--dynamic --timeout=1s --tick=200ms -f 2");
+    brk->connect();
+    auto sub = helics::BrokerFactory::create(CORE_TYPE_TO_TEST,
+                                             "--dynamic --broker=" + brk->getIdentifier());
+    sub->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.setProperty(HELICS_PROPERTY_TIME_PERIOD, 1.0);
+    fedInfo.coreInitString = "--broker=" + brk->getIdentifier();
+    fedInfo.coreName = "onlyroot" + tag;
+    auto Fed1 = std::make_shared<helics::ValueFederate>("fed1", fedInfo);
+    fedInfo.coreName = "onlysub" + tag;
+    fedInfo.coreInitString = "--broker=" + sub->getIdentifier();
+    fedInfo.setFlagOption(HELICS_FLAG_REENTRANT);
+    auto Fed2 = std::make_shared<helics::ValueFederate>("fed2", fedInfo);
+
+    Fed1->setFlagOption(HELICS_HANDLE_OPTION_RECONNECTABLE);
+    auto& in2 = Fed1->registerSubscription("pub2");
+    Fed2->registerGlobalPublication<double>("pub2");
+
+    Fed1->enterExecutingModeAsync();
+    Fed2->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+
+    auto core = Fed2->getCorePointer();
+    auto tcr = std::dynamic_pointer_cast<helics::testcore::TestCore>(core);
+    ASSERT_TRUE(tcr);
+    tcr->getCommsObjectPointer()->haltComms();  // this will terminate communications abruptly
+    tcr.reset();
+
+    int cnt{0};
+    do {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    } while (federateState(*brk, "fed2") != "disconnected" && ++cnt < 40);
+    EXPECT_EQ(federateState(*brk, "fed2"), "disconnected");
+    EXPECT_TRUE(sub->isConnected());
+    EXPECT_TRUE(brk->isConnected());
+
+    if (rejoin) {
+        helics::FederateInfo fedInfo2(CORE_TYPE_TO_TEST);
+        fedInfo2.loadInfoFromArgs("--reentrant --force_new_core --dynamic --period=1.0s --broker=" +
+                                  sub->getIdentifier());
+        std::unique_ptr<helics::ValueFederate> Fed2Redo;
+        EXPECT_NO_THROW(Fed2Redo = std::make_unique<helics::ValueFederate>("fed2", fedInfo2));
+        if (Fed2Redo) {
+            auto& pub2redo = Fed2Redo->registerGlobalPublication<double>("pub2");
+            EXPECT_NO_THROW(Fed2Redo->enterExecutingMode());
+            pub2redo.publish(-4.5);
+            Fed2Redo->requestTimeAsync(5.0);
+            EXPECT_GT(Fed1->requestTime(5.0), helics::timeZero);
+            EXPECT_DOUBLE_EQ(in2.getDouble(), -4.5);
+            Fed2Redo->requestTimeComplete();
+            Fed2Redo->finalize();
+        }
+    }
+    Fed1->finalize();
+    // with nothing else left the root lets the subbroker go and both finish
+    EXPECT_TRUE(sub->waitForDisconnect(std::chrono::milliseconds(3000)));
+    EXPECT_TRUE(brk->waitForDisconnect(std::chrono::milliseconds(3000)));
+    core->disconnect();
+    sub->disconnect();
+    brk->disconnect();
+}
+
+TEST(broker_timeout, reentrant_fed_lost_only_core_of_subbroker_rejoin)
+{
+    loseOnlyCoreOfSubbroker("rj", true);
+}
+
+TEST(broker_timeout, reentrant_fed_lost_only_core_of_subbroker_no_rejoin)
+{
+    loseOnlyCoreOfSubbroker("nr", false);
+}
+
+// without --dynamic the subbroker still leaves with its last core
+TEST(broker_timeout, reentrant_fed_lost_only_core_of_static_subbroker)
+{
+    auto brk = helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--timeout=1s --tick=200ms -f 2");
+    brk->connect();
+    auto sub = helics::BrokerFactory::create(CORE_TYPE_TO_TEST, "--broker=" + brk->getIdentifier());
+    sub->connect();
+
+    helics::FederateInfo fedInfo(CORE_TYPE_TO_TEST);
+    fedInfo.setProperty(HELICS_PROPERTY_TIME_PERIOD, 1.0);
+    fedInfo.coreInitString = "--broker=" + brk->getIdentifier();
+    fedInfo.coreName = "staticroot";
+    auto Fed1 = std::make_shared<helics::ValueFederate>("fed1", fedInfo);
+    fedInfo.coreName = "staticsub";
+    fedInfo.coreInitString = "--broker=" + sub->getIdentifier();
+    fedInfo.setFlagOption(HELICS_FLAG_REENTRANT);
+    auto Fed2 = std::make_shared<helics::ValueFederate>("fed2", fedInfo);
+
+    Fed1->enterExecutingModeAsync();
+    Fed2->enterExecutingMode();
+    Fed1->enterExecutingModeComplete();
+
+    auto core = Fed2->getCorePointer();
+    auto tcr = std::dynamic_pointer_cast<helics::testcore::TestCore>(core);
+    ASSERT_TRUE(tcr);
+    tcr->getCommsObjectPointer()->haltComms();  // this will terminate communications abruptly
+    tcr.reset();
+
+    EXPECT_TRUE(sub->waitForDisconnect(std::chrono::milliseconds(6000)));
+    EXPECT_TRUE(brk->isConnected());
+    Fed1->finalize();
+    EXPECT_TRUE(brk->waitForDisconnect(std::chrono::milliseconds(3000)));
+    core->disconnect();
+    sub->disconnect();
+    brk->disconnect();
+}
+
 // lose the core of a federate that is not reentrant while two others depend on it; with
 // --disconnect_on_lost_connection the lost federate is disconnected and the others keep going
 static void loseCoreWithFlag(const std::string& tag, bool flag)

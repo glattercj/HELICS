@@ -3560,8 +3560,24 @@ void CoreBroker::processBrokerDisconnect(ActionMessage& command, BasicBrokerInfo
         disconnectBroker(*brk);
         registerFreedRejoins();
     }
+    if (isRootc) {
+        releaseEmptySubbrokers();
+    }
+    // a dynamic subbroker that lost its last connection stays up so a federate can rejoin
+    // through it
+    const bool keepForRejoin = !isRootc && dynamicFederation &&
+        checkActionFlag(command, error_flag) && getBrokerState() == BrokerState::OPERATING;
 
-    if ((getAllConnectionState() >= ConnectionState::DISCONNECTED)) {
+    if (keepForRejoin && getAllConnectionState() >= ConnectionState::DISCONNECTED) {
+        LOG_CONNECTIONS(global_broker_id_local,
+                        getIdentifier(),
+                        "all connections lost, staying connected for federates to rejoin");
+        reportDisconnectedChildren();
+        if (brk != nullptr && !brk->_nonLocal) {
+            brk->_sent_disconnect_ack = true;
+            removeRoute(brk->route);
+        }
+    } else if ((getAllConnectionState() >= ConnectionState::DISCONNECTED)) {
         timeCoord->disconnect();
         if (!isRootc) {
             ActionMessage dis(CMD_DISCONNECT);
@@ -3646,6 +3662,11 @@ void CoreBroker::processDisconnectCommand(ActionMessage& command)
         case CMD_DISCONNECT_BROKER:
             if (brk != nullptr) {
                 disconnectBroker(*brk);
+                if (isRootc && releaseEmptySubbrokers() &&
+                    getAllConnectionState() >= ConnectionState::DISCONNECTED) {
+                    timeCoord->disconnect();
+                    addActionMessage(CMD_STOP);
+                }
                 if (command.dest_id == brk->global_id) {
                     // a higher broker dropped it; register what was waiting on it and pass it
                     // down toward its parent
@@ -3661,6 +3682,83 @@ void CoreBroker::processDisconnectCommand(ActionMessage& command)
         default:
             break;
     }
+}
+
+void CoreBroker::reportDisconnectedChildren()
+{
+    // the parent counts this broker as empty once it knows all of them are gone
+    for (const auto& child : mBrokers) {
+        if (child.parent != global_broker_id_local || child.state < ConnectionState::DISCONNECTED) {
+            continue;
+        }
+        ActionMessage gone(child._core ? CMD_DISCONNECT_CORE : CMD_DISCONNECT_BROKER);
+        gone.source_id = child.global_id;
+        gone.dest_id = parent_broker_id;
+        transmit(parent_route_id, gone);
+    }
+}
+
+bool CoreBroker::isEmptySubbroker(const BasicBrokerInfo& brk) const
+{
+    if (brk._core || brk._nonLocal || brk.state >= ConnectionState::ERROR_STATE) {
+        return false;
+    }
+    bool hadChildren{false};
+    for (const auto& child : mBrokers) {
+        if (child.parent == brk.global_id && child.global_id != brk.global_id) {
+            if (child.state < ConnectionState::DISCONNECTED) {
+                return false;
+            }
+            hadChildren = true;
+        }
+    }
+    if (!hadChildren) {
+        return false;
+    }
+    for (const auto& fed : mFederates) {
+        if (fed.parent == brk.global_id && fed.state < ConnectionState::ERROR_STATE) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool CoreBroker::releaseEmptySubbrokers()
+{
+    if (getBrokerState() != BrokerState::OPERATING) {
+        return false;
+    }
+    bool found{false};
+    for (const auto& brk : mBrokers) {
+        if (brk._nonLocal || brk.state >= ConnectionState::DISCONNECTED) {
+            continue;
+        }
+        if (!isEmptySubbroker(brk)) {
+            return false;
+        }
+        found = true;
+    }
+    if (!found) {
+        return false;
+    }
+    // everything else is done, so the subbrokers kept for a rejoin can go
+    for (size_t ii = 0; ii < mBrokers.size(); ++ii) {  // NOLINT
+        auto& brk = mBrokers[ii];
+        if (brk._nonLocal || brk.state >= ConnectionState::DISCONNECTED) {
+            continue;
+        }
+        LOG_CONNECTIONS(global_broker_id_local,
+                        getIdentifier(),
+                        fmt::format("disconnecting empty broker {}", brk.name));
+        ActionMessage dis(CMD_DISCONNECT_BROKER_ACK);
+        dis.source_id = global_broker_id_local;
+        dis.dest_id = brk.global_id;
+        transmit(brk.route, dis);
+        brk._sent_disconnect_ack = true;
+        markAsDisconnected(brk.global_id);
+        removeRoute(brk.route);
+    }
+    return true;
 }
 
 void CoreBroker::checkInFlightQueries(GlobalBrokerId brkid)
