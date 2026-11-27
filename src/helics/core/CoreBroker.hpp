@@ -368,6 +368,13 @@ class CoreBroker: public Broker, public BrokerBase {
     void processBrokerDisconnect(ActionMessage& command, BasicBrokerInfo* brk);
     /** handle a lost broker or core as a disconnect and tell the higher brokers*/
     void disconnectLostBroker(BasicBrokerInfo& brk);
+    /** tell the parent about every connection of this broker that is gone*/
+    void reportDisconnectedChildren();
+    /** check if a subbroker had connections and all of them are gone*/
+    bool isEmptySubbroker(const BasicBrokerInfo& brk) const;
+    /** disconnect the empty subbrokers once nothing else is connected; returns true if any were
+    disconnected*/
+    bool releaseEmptySubbrokers();
     /** tell the other federates that the federates of a lost broker or core are gone*/
     void disconnectLostFederates(GlobalBrokerId brkid);
     /** send a time disconnect for a lost federate to every other federate*/
